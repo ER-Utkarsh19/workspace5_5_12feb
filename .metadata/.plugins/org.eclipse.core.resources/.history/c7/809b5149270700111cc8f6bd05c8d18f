@@ -1,0 +1,110 @@
+// bip_esp32.c - Corrected for your specific BACnet stack version
+#include <string.h>
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include "bacnet/datalink/bip.h"
+#include "bacnet/bacdef.h" // For BACNET_IP_ADDRESS struct
+
+static const char *TAG = "bip_esp32";
+
+// EXTRACTED DECLARATIONS (In case they are missing from bip.h in your version)
+extern void bip_set_socket(int sock_fd);
+extern int bip_socket(void);
+
+// Helper: Get IP address from interface (Matching the required signature)
+bool bip_get_addr_by_name(const char *host_name, BACNET_IP_ADDRESS *addr)
+{
+    // For simple ESP32 client, we don't usually implement full DNS here 
+    // unless needed. Returning false is safe for basic setups.
+    return false; 
+}
+
+void bip_set_interface(const char *ifname)
+{
+    // Optional: Store interface name if needed
+}
+
+void bip_cleanup(void)
+{
+    int sock = bip_socket();
+    if (sock >= 0) {
+        close(sock);
+    }
+    bip_set_socket(-1);
+}
+
+bool bip_init(char *ifname)
+{
+    esp_netif_ip_info_t ip_info = { 0 };
+    esp_netif_t *netif = NULL;
+    int value = 1;
+    BACNET_IP_ADDRESS local_addr = {0};
+    BACNET_IP_ADDRESS broadcast_addr = {0};
+
+    // 1. Get Network Interface
+    netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == NULL) {
+        ESP_LOGE(TAG, "Failed to get network interface handle");
+        return false;
+    }
+    esp_netif_get_ip_info(netif, &ip_info);
+
+    // 2. Setup BACnet Data Link Layer info
+    // Convert ESP32 IP (uint32) to BACnet Struct (bytes)
+    // Note: ESP32 IP is usually Little Endian, BACnet often expects Big Endian bytes
+    uint32_t ip = ip_info.ip.addr;
+    uint32_t netmask = ip_info.netmask.addr;
+    uint32_t broadcast = (ip & netmask) | (~netmask);
+
+    // Fill Local Address
+    local_addr.address[0] = (uint8_t)(ip & 0xFF);
+    local_addr.address[1] = (uint8_t)((ip >> 8) & 0xFF);
+    local_addr.address[2] = (uint8_t)((ip >> 16) & 0xFF);
+    local_addr.address[3] = (uint8_t)((ip >> 24) & 0xFF);
+    local_addr.port = htons(0xBAC0U); // Port 47808
+
+    // Fill Broadcast Address
+    broadcast_addr.address[0] = (uint8_t)(broadcast & 0xFF);
+    broadcast_addr.address[1] = (uint8_t)((broadcast >> 8) & 0xFF);
+    broadcast_addr.address[2] = (uint8_t)((broadcast >> 16) & 0xFF);
+    broadcast_addr.address[3] = (uint8_t)((broadcast >> 24) & 0xFF);
+    broadcast_addr.port = htons(0xBAC0U);
+
+    bip_set_interface(ifname);
+    bip_set_port(0xBAC0U);
+    
+    // Use the struct versions of the functions
+    bip_set_addr(&local_addr);
+    bip_set_broadcast_addr(&broadcast_addr);
+
+    // 3. Create UDP Socket
+    int sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Failed to create socket");
+        return false;
+    }
+
+    struct sockaddr_in saddr = { 0 };
+    saddr.sin_family = PF_INET;
+    saddr.sin_port = htons(0xBAC0U);
+    saddr.sin_addr.s_addr = htonl(INADDR_ANY); // Listen on all interfaces
+
+    if (bind(sock, (struct sockaddr *)&saddr, sizeof(struct sockaddr_in)) < 0) {
+        ESP_LOGE(TAG, "Failed to bind socket");
+        close(sock);
+        return false;
+    }
+
+    // 4. Set Socket Options
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char *)&value, sizeof(value));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char *)&value, sizeof(value));
+
+    // 5. Handover socket to BACnet stack
+    bip_set_socket(sock);
+
+    ESP_LOGI(TAG, "BACnet/IP Initialized on Port 0xBAC0");
+    return true;
+}

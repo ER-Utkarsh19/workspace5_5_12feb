@@ -1,0 +1,6 @@
+# main/CMakeLists.txt
+
+idf_component_register(
+    SRCS "main.c" "bip_esp32.c"  # Add your new file here!
+    INCLUDE_DIRS "."
+)

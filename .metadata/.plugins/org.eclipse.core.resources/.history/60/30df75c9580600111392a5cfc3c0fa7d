@@ -1,0 +1,101 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+
+#include "bacnet/datalink/bip.h"
+#include "bacnet/basic/sys/debug.h"
+
+static const char *TAG = "bip_init";
+static int BIP_Socket = -1;
+
+void bip_set_socket(int sock_fd) {
+    BIP_Socket = sock_fd;
+}
+
+int bip_socket(void) {
+    return BIP_Socket;
+}
+
+void bip_set_interface(char *ifname) {
+}
+
+void bip_cleanup(void) {
+    if (BIP_Socket != -1) {
+        close(BIP_Socket);
+        BIP_Socket = -1;
+    }
+}
+
+// Helper to convert uint32_t IP to BACnet Struct
+static void set_bacnet_ip(BACNET_IP_ADDRESS *addr, uint32_t ip_val) {
+    // Note: IP address is already in Network Byte Order from esp_netif
+    memcpy(addr->address, &ip_val, 4);
+    addr->port = htons(0xBAC0); // Default port 47808
+}
+
+void bip_init(char *ifname) {
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+    if (netif == NULL) {
+        netif = esp_netif_get_default_netif();
+    }
+
+    if (netif != NULL) {
+        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            BACNET_IP_ADDRESS bac_ip;
+            BACNET_IP_ADDRESS bac_broadcast;
+
+            // FIX: Convert raw uint32 to BACnet Struct
+            set_bacnet_ip(&bac_ip, ip_info.ip.addr);
+            bip_set_addr(&bac_ip);
+
+            // Calculate Broadcast IP
+            uint32_t broadcast_val = (ip_info.ip.addr & ip_info.netmask.addr) | (~ip_info.netmask.addr);
+            set_bacnet_ip(&bac_broadcast, broadcast_val);
+            bip_set_broadcast_addr(&bac_broadcast);
+
+            ESP_LOGI(TAG, "BACnet IP set to: " IPSTR, IP2STR(&ip_info.ip));
+        } else {
+            ESP_LOGE(TAG, "Failed to get IP info");
+        }
+    } else {
+        ESP_LOGE(TAG, "No network interface found");
+    }
+
+    bip_set_port(0xBAC0);
+
+    // Create UDP Socket
+    if (BIP_Socket < 0) {
+        struct sockaddr_in dest_addr;
+        dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(0xBAC0);
+
+        int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+        if (sock < 0) {
+            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            return;
+        }
+
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (err < 0) {
+            ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+            close(sock);
+            return;
+        }
+
+        ESP_LOGI(TAG, "BACnet Socket created on port %d", 0xBAC0);
+        bip_set_socket(sock);
+    }
+}

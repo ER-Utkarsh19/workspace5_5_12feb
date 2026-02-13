@@ -1,0 +1,94 @@
+/*
+ * bip_esp32.c
+ *
+ *  Created on: Feb 11, 2026
+ *      Author: admin
+ */
+
+
+
+
+// bip_esp32.c - ESP32 specific BACnet/IP Initialization
+#include <string.h>
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_netif.h" // New Network Interface for IDF 5.x
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include "bacnet/datalink/bip.h"
+
+static const char *TAG = "bip_esp32";
+
+// Helper: Get IP address from interface
+long bip_get_addr_by_name(const char *host_name)
+{
+    return 0; // Not strictly needed for basic IP setup
+}
+
+void bip_set_interface(const char *ifname)
+{
+    // Optional: Store interface name if needed
+}
+
+void bip_cleanup(void)
+{
+    int sock = bip_socket();
+    if (sock >= 0) {
+        close(sock);
+    }
+    bip_set_socket(-1);
+}
+
+bool bip_init(char *ifname)
+{
+    esp_netif_ip_info_t ip_info = { 0 };
+    esp_netif_t *netif = NULL;
+    int value = 1;
+
+    // 1. Get Network Interface (Updated for IDF 5.x)
+    // We assume Station mode (Client). If using Ethernet, change key to "ETH_DEF"
+    netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    
+    if (netif == NULL) {
+        ESP_LOGE(TAG, "Failed to get network interface handle");
+        return false;
+    }
+
+    esp_netif_get_ip_info(netif, &ip_info);
+
+    // 2. Setup BACnet Data Link Layer info
+    bip_set_interface(ifname);
+    bip_set_port(0xBAC0U); // Standard Port 47808
+    bip_set_addr(ip_info.ip.addr);
+    bip_set_broadcast_addr(
+        (ip_info.ip.addr & ip_info.netmask.addr) | (~ip_info.netmask.addr)
+    );
+
+    // 3. Create UDP Socket
+    int sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Failed to create socket");
+        return false;
+    }
+
+    struct sockaddr_in saddr = { 0 };
+    saddr.sin_family = PF_INET;
+    saddr.sin_port = htons(0xBAC0U);
+    saddr.sin_addr.s_addr = htonl(INADDR_ANY); // Listen on all interfaces
+
+    if (bind(sock, (struct sockaddr *)&saddr, sizeof(struct sockaddr_in)) < 0) {
+        ESP_LOGE(TAG, "Failed to bind socket");
+        close(sock);
+        return false;
+    }
+
+    // 4. Set Socket Options
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char *)&value, sizeof(value));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char *)&value, sizeof(value));
+
+    // 5. Handover socket to BACnet stack
+    bip_set_socket(sock);
+
+    ESP_LOGI(TAG, "BACnet/IP Initialized on Port 0xBAC0");
+    return true;
+}

@@ -1,0 +1,28 @@
+# Component registration for BACnet Stack on ESP32
+set(bacnet_dir "src/bacnet")
+set(port_dir "ports/esp32")
+set(mstp_port_dir "ports/esp32_mstp")
+
+# Register the component and select specific source files
+idf_component_register(
+    SRCS 
+        # Core logic from src/bacnet
+        "${bacnet_dir}/apdu.c"
+        "${bacnet_dir}/npdu.c"
+        "${bacnet_dir}/whois.c"
+        "${bacnet_dir}/rp.c"
+        "${bacnet_dir}/wp.c"
+        "${bacnet_dir}/datalink/bip.c"       # BACnet IP logic
+        "${bacnet_dir}/datalink/dlmstp.c"    # BACnet MS/TP logic
+        
+        # Hardware-specific ports for ESP32
+        "${port_dir}/net.c"                  # Network/IP glue
+        "${port_dir}/stubs.c"                # Required stubs
+        "${mstp_port_dir}/rs485.c"           # UART Driver for MS/TP
+    INCLUDE_DIRS 
+        "src"                                # Allows #include "bacnet/..."
+        "ports/esp32"
+        "ports/esp32_mstp"
+    REQUIRES 
+        lwip driver nvs_flash esp_netif      # Core ESP-IDF dependencies
+)

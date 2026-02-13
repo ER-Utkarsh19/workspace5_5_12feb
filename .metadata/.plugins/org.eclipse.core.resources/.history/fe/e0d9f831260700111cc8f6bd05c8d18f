@@ -1,0 +1,50 @@
+# components/bacnet/CMakeLists.txt
+
+# 1. CORE PROTOCOL FILES
+set(BACNET_SOURCES
+    "src/bacdcode.c"
+    "src/bacint.c"
+    "src/bacstr.c"
+    "src/bacreal.c"
+    "src/bacapp.c"
+    "src/bacaddr.c"
+    "src/npdu.c"
+    "src/apdu.c"
+    "src/reject.c"
+    "src/fifo.c"
+    "src/datetime.c"
+    "src/datalink/bip.c"
+    "src/datalink/bvlc.c"
+    "src/basic/tsm/tsm.c"
+    "src/basic/npdu/h_npdu.c"
+    "src/basic/service/h_noserv.c"
+    
+    # 2. BASIC OBJECTS ONLY (Required for Hitachi VRF)
+    "src/basic/object/device.c"
+    "src/basic/object/ai.c"
+    "src/basic/object/ao.c"
+    "src/basic/object/av.c"
+    "src/basic/object/bi.c"
+    "src/basic/object/bo.c"
+    "src/basic/object/bv.c"
+    
+    # 3. CLIENT SERVICES (To read/write the Hitachi Gateway)
+    "src/basic/service/h_rp.c"
+    "src/basic/service/s_rp.c"
+    "src/basic/service/h_wp.c"
+    "src/basic/service/s_wp.c"
+)
+
+idf_component_register(
+    SRCS ${BACNET_SOURCES}
+    INCLUDE_DIRS "include" "include/bacnet" "src"
+    REQUIRES lwip esp_wifi esp_netif driver esp_timer nvs_flash
+)
+
+# 4. COMPILER SETTINGS (Critical for memory and errors)
+target_compile_options(${COMPONENT_LIB} PRIVATE 
+    -Wno-error 
+    -w 
+    -ffunction-sections 
+    -fdata-sections
+)

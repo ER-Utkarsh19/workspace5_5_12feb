@@ -1,0 +1,8 @@
+#include <stdio.h>
+#include "bacnet/basic/object/device.h" // This tests if the include path works
+
+void bacnet_component_init(void)
+{
+    // We will put initialization code here later
+    printf("BACnet Component Initialized\n");
+}

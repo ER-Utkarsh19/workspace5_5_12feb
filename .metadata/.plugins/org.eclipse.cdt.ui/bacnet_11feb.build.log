@@ -1,0 +1,6 @@
+cmake --build . -- -v
+ninja: error: loading 'build.ninja': The system cannot find the file specified.
+
+
+Build complete (0 errors, 0 warnings): C:\Users\admin\worskpace_esp5.5\bacnet_11feb\build
+Total time taken to build the project: 11,739 ms

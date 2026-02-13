@@ -1,0 +1,9 @@
+first flash the code on esp32 
+
+then obtain hex code exclude start and end copy middle part
+
+then go in dumpx.txt(x=0 to n) paste the code hex 
+
+go to cmd copy path and do cd
+
+then run command  python hex_to_pgmx.py

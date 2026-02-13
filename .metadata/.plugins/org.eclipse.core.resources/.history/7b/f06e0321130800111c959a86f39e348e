@@ -1,0 +1,28 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include "bacnet/datalink/mstp.h"
+#include "bacnet/datalink/dlmstp.h"
+
+bool dlmstp_init(char *ifname) { return false; }
+void dlmstp_set_mac_address(uint8_t mac) { }
+uint8_t dlmstp_mac_address(void) { return 0; }
+void dlmstp_set_max_info_frames(uint8_t max) { }
+void dlmstp_set_max_master(uint8_t max) { }
+
+/* Added missing stubs for v1.x Datalink */
+void dlmstp_get_my_address(BACNET_ADDRESS *my_address) { 
+    if (my_address) memset(my_address, 0, sizeof(BACNET_ADDRESS)); 
+}
+void dlmstp_get_broadcast_address(BACNET_ADDRESS *dest) {
+    if (dest) {
+        dest->net = BACNET_BROADCAST_NETWORK;
+        dest->mac_len = 0;
+    }
+}
+
+uint16_t MSTP_Get_Reply(struct mstp_port_struct_t *mstp_port, unsigned timeout) { return 0; }
+void MSTP_Send_Frame(struct mstp_port_struct_t *mstp_port, const uint8_t *buffer, uint16_t nbytes) { }
+
+uint16_t dlmstp_receive(BACNET_ADDRESS *src, uint8_t *pdu, uint16_t max_pdu, unsigned timeout) { return 0; }
+int dlmstp_send_pdu(BACNET_ADDRESS *dest, BACNET_NPDU_DATA *npdu_data, uint8_t *pdu, unsigned pdu_len) { return 0; }

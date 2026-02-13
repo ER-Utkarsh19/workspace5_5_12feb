@@ -1,0 +1,10 @@
+
+file(GLOB_RECURSE BACNET_SOURCES
+    "src/*.c"
+)
+
+idf_component_register(
+    SRCS ${BACNET_SOURCES}
+    INCLUDE_DIRS "." "include" "src"
+    REQUIRES lwip esp_wifi esp_netif
+)

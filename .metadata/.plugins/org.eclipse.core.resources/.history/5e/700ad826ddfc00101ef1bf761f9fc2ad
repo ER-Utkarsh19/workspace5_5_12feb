@@ -1,0 +1,114 @@
+/*
+ * tflm_inference.c
+ *
+ *  Created on: Jan 29, 2026
+ *      Author: admin
+ */
+#include "model_inference.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
+
+// --- LiteRT Headers (As per Google Guide) ---
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_log.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+
+static const char *TAG = "LiteRT_Setup";
+
+// --- Globals ---
+// 1. The Tensor Arena (Memory for the AI)
+// Google guide uses 2KB for Hello World, but for 96x96 images we need ~60KB+
+const int kTensorArenaSize = 60 * 1024;
+static uint8_t *tensor_arena = nullptr;
+
+// 2. LiteRT Objects
+static tflite::MicroInterpreter *interpreter = nullptr;
+static const tflite::Model *model = nullptr;
+static tflite::MicroMutableOpResolver<5> *op_resolver = nullptr; // We'll add 5 ops mostly used in vision
+static TfLiteTensor *input_tensor = nullptr;
+static TfLiteTensor *output_tensor = nullptr;
+
+// --- DUMMY MODEL DATA (Until you train your own) ---
+// This acts as a placeholder so the code compiles and links.
+// Later, you will replace this with #include "model.h"
+const unsigned char g_model_data[] = { 
+    0x1c, 0x00, 0x00, 0x00, // Magic numbers (just to pass basic checks if we were lucky)
+    // ... This would be your real trained model bytes ...
+};
+
+bool model_setup(void) {
+    // A. Allocate the Arena (ESP32 specific)
+    tensor_arena = (uint8_t *)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!tensor_arena) {
+        // Fallback to internal RAM if SPIRAM fails or isn't available
+        tensor_arena = (uint8_t *)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    
+    if (!tensor_arena) {
+        ESP_LOGE(TAG, "Failed to allocate Tensor Arena!");
+        return false;
+    }
+
+    // B. Load Model (Google Guide Step 5)
+    // NOTE: This will fail validity checks right now because g_model_data is fake.
+    // We will bypass the check for this test phase.
+    model = tflite::GetModel(g_model_data);
+    
+    // C. Setup Op Resolver (Google Guide Step 6)
+    // We explicitly add the layers typically used in image models (Conv2D, etc)
+    // This saves memory compared to loading "ALL" ops.
+    static tflite::MicroMutableOpResolver<5> resolver;
+    resolver.AddConv2D();
+    resolver.AddMaxPool2D();
+    resolver.AddFullyConnected();
+    resolver.AddSoftmax();
+    resolver.AddReshape();
+    op_resolver = &resolver;
+
+    // D. Instantiate Interpreter (Google Guide Step 8)
+    static tflite::MicroInterpreter static_interpreter(
+        model, resolver, tensor_arena, kTensorArenaSize);
+    interpreter = &static_interpreter;
+
+    // E. Allocate Tensors (Google Guide Step 9)
+    TfLiteStatus allocate_status = interpreter->AllocateTensors();
+    if (allocate_status != kTfLiteOk) {
+        ESP_LOGE(TAG, "AllocateTensors() failed! (Expected, since model is fake)");
+        // return false; // Commented out so you can verify the rest of the flow
+    }
+
+    // F. Get Pointers (Google Guide Step 10)
+    input_tensor = interpreter->input(0);
+    output_tensor = interpreter->output(0);
+
+    ESP_LOGE(TAG, "LiteRT System Setup Complete (Waiting for Real Model)");
+    return true;
+}
+
+int model_run_inference(int8_t *image_data) {
+    // 1. Safety Check
+    if (interpreter == nullptr) {
+        return 0; // System not ready
+    }
+
+    // 2. Load Data (Google Guide Step 11)
+    // We copy your 96x96 image into the AI's input buffer
+    // memcpy(input_tensor->data.int8, image_data, 96 * 96);
+
+    // 3. Invoke (Google Guide Step 12)
+    // TfLiteStatus invoke_status = interpreter->Invoke();
+    
+    // 4. Return Fake Result (Since model is fake)
+    // In real life, we would read output_tensor->data.f[0]
+    
+    // LOGIC: If the center pixel is very bright, pretend it's a "Dropping"
+    int center_pixel = image_data[(96*48) + 48];
+    if (center_pixel > 100) return 2; // Dropping
+    if (center_pixel > 20) return 1;  // Dirty
+    return 0;                         // Clean
+}
+
+
+

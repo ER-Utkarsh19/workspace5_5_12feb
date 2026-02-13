@@ -1,0 +1,2 @@
+C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Users\admin\Downloads\esp-idf-v5.5.2\components\partition_table\gen_esp32part.py C:\Users\admin\worskpace_esp5.5\basic\build\partition_table\partition-table.bin
+Total time taken to build the project: 180,535 ms

@@ -1,0 +1,23 @@
+                            Memory Type Usage Summary                             
++--------------------------------------------------------------------------------+
+| Memory Type/Section | Used [bytes] | Used [%] | Remain [bytes] | Total [bytes] |
+|---------------------+--------------+----------+----------------+---------------|
+| Flash Code          |       102622 |          |                |               |
+|    .text            |       102622 |          |                |               |
+| DIRAM               |        72231 |    21.14 |         269529 |        341760 |
+|    .text            |        48759 |    14.27 |                |               |
+|    .data            |        11960 |      3.5 |                |               |
+|    .bss             |        11512 |     3.37 |                |               |
+| Flash Data          |        50568 |          |                |               |
+|    .rodata          |        50312 |          |                |               |
+|    .appdesc         |          256 |          |                |               |
+| IRAM                |        16384 |    100.0 |              0 |         16384 |
+|    .text            |        15356 |    93.73 |                |               |
+|    .vectors         |         1028 |     6.27 |                |               |
+| RTC SLOW            |           32 |     0.39 |           8160 |          8192 |
+|    .force_slow      |           32 |     0.39 |                |               |
+| RTC FAST            |           24 |     0.29 |           8168 |          8192 |
+|    .rtc_reserved    |           24 |     0.29 |                |               |
++--------------------------------------------------------------------------------+
+C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Users\admin\Downloads\esp-idf-v5.5.2\components\partition_table\gen_esp32part.py C:\Users\admin\worskpace_esp5.5\dvp_spi_lcd_v1\build\partition_table\partition-table.bin
+Total time taken to build the project: 17,591 ms

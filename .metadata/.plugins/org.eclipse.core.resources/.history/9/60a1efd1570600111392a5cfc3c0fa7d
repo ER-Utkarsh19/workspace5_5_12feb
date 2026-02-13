@@ -1,0 +1,89 @@
+//
+// Copyleft  F.Chaxel 2017
+//
+
+#include "esp_log.h"
+#include "esp_wifi.h"
+
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+
+#include "bacnet/datalink/bip.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include "esp_wifi.h"
+#include "esp_netif.h" // Needed for the new API
+#include "bacnet/datalink/bip.h"
+#include "bacnet/basic/sys/debug.h"
+/* Include BIP_Socket parts from old version:*/
+static int BIP_Socket = -1;
+
+/** Setter for the BACnet/IP socket handle.
+ *
+ * @param sock_fd [in] Handle for the BACnet/IP socket.
+ */
+void bip_set_socket(
+    int sock_fd)
+{
+    BIP_Socket = sock_fd;
+}
+/** Getter for the BACnet/IP socket handle.
+ *
+ * @return The handle to the BACnet/IP socket.
+ */
+int bip_socket(
+    void)
+{
+    return BIP_Socket;
+}
+
+/* 
+long bip_get_addr_by_name(const char *host_name)  //already defined into datalink/bip.h
+{
+    return 0;
+}
+ */
+
+void bip_set_interface(char *ifname)
+{
+}
+
+void bip_cleanup(void)
+{
+    close(bip_socket());
+    bip_set_socket(-1);
+}
+/************************added files*************/
+
+
+/********************************************/
+void bip_init(char *ifname)
+{
+    // NEW ESP-IDF v5.x Code
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+    if (netif == NULL) {
+        // Fallback: try to get the default station interface
+        netif = esp_netif_get_default_netif();
+    }
+
+    if (netif != NULL) {
+        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            // Success! Set the BACnet IP and Broadcast Address
+            bip_set_addr(ip_info.ip.addr);
+            bip_set_broadcast_addr(
+                (ip_info.ip.addr & ip_info.netmask.addr) | (~ip_info.netmask.addr)
+            );
+        } else {
+            debug_printf("BACnet: Failed to get IP info\n");
+        }
+    } else {
+        debug_printf("BACnet: No network interface found\n");
+    }
+
+    // Set the standard BACnet/IP port (0xBAC0 = 47808)
+    bip_set_port(0xBAC0);
+}
+/******* Add parts from bip.c */
+

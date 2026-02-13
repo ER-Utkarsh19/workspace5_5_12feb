@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS "main.c"
+    PRIV_REQUIRES 
+        bacnet-stack 
+        esp_wifi 
+        esp_event 
+        esp_netif 
+        nvs_flash
+)
+
+# Move your definitions here to avoid global CMake errors
+target_compile_definitions(${COMPONENT_LIB} PUBLIC BACDL_BIP)

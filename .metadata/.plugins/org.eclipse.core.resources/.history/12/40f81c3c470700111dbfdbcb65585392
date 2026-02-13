@@ -1,0 +1,17 @@
+# Standard ESP-IDF Component Registration
+idf_component_register(
+    SRCS "main.c"
+    PRIV_REQUIRES 
+        bacnet-stack 
+        esp_wifi 
+        esp_event 
+        esp_netif 
+        nvs_flash 
+        esp_log
+)
+
+# Use target_compile_definitions instead of the global command inside a component
+target_compile_definitions(${COMPONENT_LIB} PUBLIC 
+    BACDL_BIP 
+    # BACDL_MSTP # Uncomment this when you switch to MS/TP logic
+)

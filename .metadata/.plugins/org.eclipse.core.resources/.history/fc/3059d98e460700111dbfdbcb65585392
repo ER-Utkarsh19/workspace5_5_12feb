@@ -1,0 +1,16 @@
+# Add this to your existing component CMakeLists.txt
+set(bacnet_dir "src/bacnet")
+set(port_dir "ports/esp32")
+
+idf_component_register(
+    SRCS
+        "${bacnet_dir}/datalink/bip.c"       # Core BACnet IP logic
+        "${bacnet_dir}/npdu.c"
+        "${bacnet_dir}/apdu.c"
+        "${bacnet_dir}/whois.c"
+        "${bacnet_dir}/rp.c"                 # Read Property
+        "${port_dir}/net.c"                  # Network glue for ESP32
+        "${port_dir}/stubs.c"
+    INCLUDE_DIRS "src" "ports/esp32"
+    REQUIRES lwip esp_netif nvs_flash      # Essential for IP
+)

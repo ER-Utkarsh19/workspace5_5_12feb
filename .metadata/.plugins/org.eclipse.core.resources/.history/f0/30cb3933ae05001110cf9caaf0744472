@@ -1,0 +1,44 @@
+# components/bacnet/CMakeLists.txt
+
+# 1. Setup paths
+set(BACNET_ROOT "bacnet-stack")
+
+# 2. Add Source Files
+# We use GLOB_RECURSE to find all .c files, BUT we will remove the bad ones next.
+file(GLOB_RECURSE BACNET_SOURCES 
+    "${BACNET_ROOT}/src/bacnet/*.c"
+)
+
+# 3. EXCLUDE the Router Logic (Fixes your error)
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*h_routed_npdu.c$")
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*s_router.c$")
+
+# 4. EXCLUDE PC/Linux specific files (Fixes duplicate main/socket errors)
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*ports/.*") 
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*apps/.*")
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*demo/.*")
+
+# 5. Register the component
+idf_component_register(
+    SRCS 
+        "bacnet.c"           # Your main component file
+        ${BACNET_SOURCES}    # The filtered stack files
+    
+    INCLUDE_DIRS 
+        "include"
+        "${BACNET_ROOT}/src"
+        "${BACNET_ROOT}/src/bacnet/basic/object"
+        "${BACNET_ROOT}/src/bacnet/basic/service"
+    
+    REQUIRES 
+        lwip 
+        nvs_flash
+)
+
+# 6. Compiler Flags
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    BACNET_STACK_STATIC_DEFINE
+    BACDL_BIP=1      # BACnet/IP
+    BACDL_MSTP=0     # No MS/TP
+    BAC_ROUTING=0    # Disable Routing
+)

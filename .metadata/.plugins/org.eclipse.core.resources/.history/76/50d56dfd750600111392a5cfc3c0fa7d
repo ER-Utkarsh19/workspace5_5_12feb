@@ -1,0 +1,26 @@
+idf_component_register(
+    SRCS
+        "src/bvlc.c"
+        "src/datalink.c"
+
+        # Core BACnet stack
+        "src/binding/address.c"
+        "src/client/whois.c"
+        "src/client/iam.c"
+        "src/client/rp.c"
+        "src/client/wp.c"
+
+        "src/npdu/npdu.c"
+        "src/service/apdu.c"
+
+        "src/sys/bacapp.c"
+        "src/sys/bactext.c"
+        "src/sys/bigend.c"
+
+        "src/tsm/tsm.c"
+
+    INCLUDE_DIRS
+        "include"
+        "include/bacnet"
+        "src"
+)

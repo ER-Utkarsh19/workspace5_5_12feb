@@ -1,0 +1,3 @@
+idf_component_register(SRCS "dvp_spi_lcd_main.c" "model_inference.cc"
+                    INCLUDE_DIRS "."
+                    REQUIRES esp-tflite-micro)

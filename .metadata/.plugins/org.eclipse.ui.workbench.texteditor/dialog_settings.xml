@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="Workbench">
+	<section name="org.eclipse.ui.texteditor.FindReplaceDialog">
+		<item key="selection" value="#define MAX_TSM_TRANSACTIONS"/>
+		<item key="wrap" value="false"/>
+		<item key="casesensitive" value="false"/>
+		<item key="wholeword" value="true"/>
+		<item key="incremental" value="false"/>
+		<item key="isRegEx" value="true"/>
+		<list key="findhistory">
+			<item value="#define MAX_TSM_TRANSACTIONS"/>
+			<item value="#define BACAPP_ALL"/>
+			<item value="soft"/>
+			<item value="Host IP"/>
+			<item value="Host Ip"/>
+			<item value="Host "/>
+			<item value="Host ip"/>
+			<item value="host ip"/>
+			<item value="MB_DEVICE_ADDR1"/>
+			<item value="save"/>
+			<item value="resize"/>
+			<item value="spiffs"/>
+			<item value="y_stats_t"/>
+			<item value="cam_buffer"/>
+			<item value="s_camera"/>
+		</list>
+		<list key="replacehistory">
+			<item value="MB_DEVICE_ADDR2"/>
+		</list>
+	</section>
+	<section name="org.eclipse.ui.texteditor.FindReplaceDialog_dialogBounds">
+		<item key="DIALOG_X_ORIGIN" value="1131"/>
+		<item key="DIALOG_Y_ORIGIN" value="183"/>
+		<item key="DIALOG_WIDTH" value="414"/>
+		<item key="DIALOG_HEIGHT" value="454"/>
+		<item key="DIALOG_FONT_NAME" value="1|Segoe UI|9.0|0|WINDOWS|1|-15|0|0|0|400|0|0|0|1|0|0|0|0|Segoe UI"/>
+	</section>
+</section>

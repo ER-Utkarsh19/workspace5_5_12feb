@@ -1,0 +1,747 @@
+#include "esp_modbus_master.h"
+#include "string.h"
+#include "esp_log.h"
+#include "modbus_params.h"  // for modbus parameters structures
+
+#include "driver/uart.h"
+#include "mbcontroller.h"
+#include "sdkconfig.h"
+
+#define MB_PORT_NUM     (CONFIG_MB_UART_PORT_NUM)   // Number of UART port used for Modbus connection
+#define MB_DEV_SPEED    (CONFIG_MB_UART_BAUD_RATE)  // The communication speed of the UART
+
+// Note: Some pins on target chip cannot be assigned for UART communication.
+// See UART documentation for selected board and target to configure pins using Kconfig.
+
+// The number of parameters that intended to be used in the particular control process
+#define MASTER_MAX_CIDS num_device_parameters
+
+// Number of reading of parameters from slave
+#define MASTER_MAX_RETRY 30
+
+// Timeout to update cid over Modbus
+#define UPDATE_CIDS_TIMEOUT_MS          (500)
+#define UPDATE_CIDS_TIMEOUT_TICS        (UPDATE_CIDS_TIMEOUT_MS / portTICK_PERIOD_MS)
+
+// Timeout between polls
+#define POLL_TIMEOUT_MS                 (1)
+#define POLL_TIMEOUT_TICS               (POLL_TIMEOUT_MS / portTICK_PERIOD_MS)
+
+// The macro to get offset for parameter in the appropriate structure
+#define HOLD_OFFSET(field) ((uint16_t)(offsetof(holding_reg_params_t, field) +1 ))
+#define INPUT_OFFSET(field) ((uint16_t)(offsetof(input_reg_params_t, field) + 1))
+#define COIL_OFFSET(field) ((uint16_t)(offsetof(coil_reg_params_t, field) + 1))
+// Discrete offset macro
+#define DISCR_OFFSET(field) ((uint16_t)(offsetof(discrete_reg_params_t, field) + 1))
+
+#define STR(fieldname) ((const char*)( fieldname ))
+// Options can be used as bit masks or parameter limits
+#define OPTS(min_val, max_val, step_val) { .opt1 = min_val, .opt2 = max_val, .opt3 = step_val }
+
+static const char *TAG = "MASTER_TEST";
+
+// Enumeration of modbus device addresses accessed by master device
+enum {
+    MB_DEVICE_ADDR1 = 1 // Only one slave device used for the test (add other slave addresses here)
+};
+
+holding_reg_params_t holding_reg_params = {0};
+input_reg_params_t input_reg_params = {0};
+coil_reg_params_t coil_reg_params = {0};
+discrete_reg_params_t discrete_reg_params = {0};
+
+// Enumeration of all supported CIDs for device (used in parameter definition table)
+enum {
+CID_HOLD_DATA_0=0,
+    CID_HOLD_DATA_1,
+    CID_HOLD_DATA_2,
+    CID_HOLD_DATA_3,
+    CID_HOLD_DATA_4,
+    CID_HOLD_DATA_5,
+    CID_HOLD_DATA_6,
+    CID_HOLD_DATA_7,
+    CID_HOLD_DATA_8,
+    CID_HOLD_DATA_9,
+    CID_HOLD_DATA_10,
+    CID_HOLD_DATA_11,
+    CID_HOLD_DATA_12,
+    CID_HOLD_DATA_13,
+    CID_HOLD_DATA_14,
+    CID_HOLD_DATA_15,
+    CID_HOLD_DATA_16,
+    CID_HOLD_DATA_17,
+    CID_HOLD_DATA_18,
+    CID_HOLD_DATA_19,
+  /*  CID_HOLD_DATA_20,
+    CID_HOLD_DATA_21,
+    CID_HOLD_DATA_22,
+    CID_HOLD_DATA_23,
+    CID_HOLD_DATA_24,
+    CID_HOLD_DATA_25,
+    CID_HOLD_DATA_26,
+    CID_HOLD_DATA_27,
+    CID_HOLD_DATA_28,
+    CID_HOLD_DATA_29,
+    CID_HOLD_DATA_30,*/
+    CID_COUNT,
+};
+
+// Example Data (Object) Dictionary for Modbus parameters:
+// The CID field in the table must be unique.
+// Modbus Slave Addr field defines slave address of the device with correspond parameter.
+// Modbus Reg Type - Type of Modbus register area (Holding register, Input Register and such).
+// Reg Start field defines the start Modbus register number and Reg Size defines the number of registers for the characteristic accordingly.
+// The Instance Offset defines offset in the appropriate parameter structure that will be used as instance to save parameter value.
+// Data Type, Data Size specify type of the characteristic and its data size.
+// Parameter Options field specifies the options that can be used to process parameter value (limits or masks).
+// Access Mode - can be used to implement custom options for processing of characteristic (Read/Write restrictions, factory mode values and etc).
+
+const mb_parameter_descriptor_t device_parameters[]= {
+	
+	{ CID_HOLD_DATA_0,STR("AC UNIT"),STR("ON/OFF"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,0,1,
+	HOLD_OFFSET(holding_data0),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_1,STR("AC UNIT mode"),STR("auto,heat,dry,fan,cool"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,1,1,
+	HOLD_OFFSET(holding_data1),PARAM_TYPE_U16,2,OPTS(0, 4, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_2,STR("AC UNIT fan speed"),STR("auto low mid high super high"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,2,1,
+	HOLD_OFFSET(holding_data2),PARAM_TYPE_U16,2,OPTS(0, 4, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_3,STR("AC UNIT vane position"),STR("pos1 to pos7,swing"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,3,1,
+	HOLD_OFFSET(holding_data3),PARAM_TYPE_U16,2,OPTS(1, 8, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_4,STR("AC UNIT temp setpoint"),STR("ac uint temp setpoint"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,4,1,
+	HOLD_OFFSET(holding_data4),PARAM_TYPE_U16,2,OPTS(1, 3, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_5,STR("AC UNIT temp reference"),STR("reference"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,5,1,
+	HOLD_OFFSET(holding_data5),PARAM_TYPE_U16,2,OPTS(1, 3, 1),PAR_PERMS_READ_TRIGGER},
+	{ CID_HOLD_DATA_6,STR("window contact"),STR("open/close"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,6,1,
+	HOLD_OFFSET(holding_data6),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_7,STR("adapter enable/ disable"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,7,1,
+	HOLD_OFFSET(holding_data7),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_8,STR("ac remote control"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,8,1,
+	HOLD_OFFSET(holding_data8),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_9,STR("ac unit operation time"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,9,1,
+	HOLD_OFFSET(holding_data9),PARAM_TYPE_U16,2,OPTS(1, 1, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_10,STR("ac unit alarm status"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,10,1,
+	HOLD_OFFSET(holding_data10),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_TRIGGER},
+	{ CID_HOLD_DATA_11,STR("error code"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,11,1,
+	HOLD_OFFSET(holding_data11),PARAM_TYPE_U16,2,OPTS(0, 2, 1),PAR_PERMS_READ_TRIGGER},
+	{ CID_HOLD_DATA_12,STR("ambient temp"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,22,1,
+	HOLD_OFFSET(holding_data12),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_13,STR("ac real temp setpoint"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,23,1,
+	HOLD_OFFSET(holding_data13),PARAM_TYPE_U16,2,OPTS(1, 3, 1),PAR_PERMS_READ_TRIGGER},
+	{ CID_HOLD_DATA_14,STR("current ac max setpoint"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,24,1,
+	HOLD_OFFSET(holding_data14),PARAM_TYPE_U16,2,OPTS(1, 2, 1),PAR_PERMS_READ_TRIGGER},
+	{ CID_HOLD_DATA_15,STR("current ac min setpoint"),STR("enable/ disable"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,25,1,
+	HOLD_OFFSET(holding_data15),PARAM_TYPE_U16,2,OPTS(1, 2, 1),PAR_PERMS_READ_TRIGGER},
+	{ CID_HOLD_DATA_16,STR("status"),STR("feedback"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,31,1,
+	HOLD_OFFSET(holding_data16),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_TRIGGER},	
+	{ CID_HOLD_DATA_17,STR("lef/right vane pulse"),STR("feedback"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,34,1,
+	HOLD_OFFSET(holding_data17),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_WRITE_TRIGGER},
+	{ CID_HOLD_DATA_18,STR("return path temp"),STR("feedback"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,66,1,
+	HOLD_OFFSET(holding_data18),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_TRIGGER},
+	{ CID_HOLD_DATA_19,STR("gateway"),STR("slave"),MB_DEVICE_ADDR1,MB_PARAM_HOLDING,98,1,
+	HOLD_OFFSET(holding_data19),PARAM_TYPE_U16,2,OPTS(0, 1, 1),PAR_PERMS_READ_WRITE_TRIGGER},
+	};
+	
+
+
+// Calculate number of parameters in the table
+const uint16_t num_device_parameters = (sizeof(device_parameters)/sizeof(device_parameters[0]));
+
+// The function to get pointer to parameter storage (instance) according to parameter description table
+static void* master_get_param_data(const mb_parameter_descriptor_t* param_descriptor)
+{
+    assert(param_descriptor != NULL);
+    void* instance_ptr = NULL;
+    if (param_descriptor->param_offset != 0) {
+       switch(param_descriptor->mb_param_type)
+       {
+           case MB_PARAM_HOLDING:
+               instance_ptr = ((void*)&holding_reg_params + param_descriptor->param_offset - 1);
+               break;
+           case MB_PARAM_INPUT:
+               instance_ptr = ((void*)&input_reg_params + param_descriptor->param_offset - 1);
+               break;
+           case MB_PARAM_COIL:
+               instance_ptr = ((void*)&coil_reg_params + param_descriptor->param_offset - 1);
+               break;
+           case MB_PARAM_DISCRETE:
+               instance_ptr = ((void*)&discrete_reg_params + param_descriptor->param_offset - 1);
+               break;
+           default:
+               instance_ptr = NULL;
+               break;
+       }
+    } else {
+        ESP_LOGE(TAG, "Wrong parameter offset for CID #%u", (unsigned)param_descriptor->cid);
+        assert(instance_ptr != NULL);
+    }
+    return instance_ptr;
+}
+
+// User operation function to read slave values and check alarm
+/*
+static void master_operation_func(void *arg)
+{
+    esp_err_t err = ESP_OK;
+    float value = 0;
+    bool alarm_state = false;
+    const mb_parameter_descriptor_t* param_descriptor = NULL;
+
+    ESP_LOGI(TAG, "Start modbus test...");
+
+    for(uint16_t retry = 0; retry <= MASTER_MAX_RETRY && (!alarm_state); retry++) {
+        // Read all found characteristics from slave(s)
+        for (uint16_t cid = 0; (err != ESP_ERR_NOT_FOUND) && cid < MASTER_MAX_CIDS; cid++)
+        {
+            // Get data from parameters description table
+            // and use this information to fill the characteristics description table
+            // and having all required fields in just one table
+            err = mbc_master_get_cid_info(cid, &param_descriptor);
+            if ((err != ESP_ERR_NOT_FOUND) && (param_descriptor != NULL)) {
+                void* temp_data_ptr = master_get_param_data(param_descriptor);
+                assert(temp_data_ptr);
+                uint8_t type = 0;
+                if ((param_descriptor->param_type == PARAM_TYPE_ASCII) &&
+                        (param_descriptor->cid == CID_HOLD_TEST_REG)) {
+                   // Check for long array of registers of type PARAM_TYPE_ASCII
+                    err = mbc_master_get_parameter(cid, (char*)param_descriptor->param_key,
+                                                    (uint8_t*)temp_data_ptr, &type);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "Characteristic #%u %s (%s) value = (0x%" PRIx32 ") read successful.",
+                                        param_descriptor->cid,
+                                        param_descriptor->param_key,
+                                        param_descriptor->param_units,
+                                        *(uint32_t*)temp_data_ptr);
+                        // Initialize data of test array and write to slave
+                        if (*(uint32_t*)temp_data_ptr != 0xAAAAAAAA) {
+                            memset((void*)temp_data_ptr, 0xAA, param_descriptor->param_size);
+                            *(uint32_t*)temp_data_ptr = 0xAAAAAAAA;
+                            err = mbc_master_set_parameter(cid, (char*)param_descriptor->param_key,
+                                                              (uint8_t*)temp_data_ptr, &type);
+                            if (err == ESP_OK) {
+                                ESP_LOGI(TAG, "Characteristic #%u %s (%s) value = (0x%" PRIx32 "), write successful.",
+                                                param_descriptor->cid,
+                                                param_descriptor->param_key,
+                                                param_descriptor->param_units,
+                                                *(uint32_t*)temp_data_ptr);
+                            } else {
+                                ESP_LOGE(TAG, "Characteristic #%u (%s) write fail, err = 0x%x (%s).",
+                                                param_descriptor->cid,
+                                                param_descriptor->param_key,
+                                                (int)err,
+                                                (char*)esp_err_to_name(err));
+                            }
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "Characteristic #%u (%s) read fail, err = 0x%x (%s).",
+                                        param_descriptor->cid,
+                                        param_descriptor->param_key,
+                                        (int)err,
+                                        (char*)esp_err_to_name(err));
+                    }
+                } else {
+                    err = mbc_master_get_parameter(cid, (char*)param_descriptor->param_key,
+                                                        (uint8_t*)temp_data_ptr, &type);
+                    if (err == ESP_OK) {
+                        if ((param_descriptor->mb_param_type == MB_PARAM_HOLDING) ||
+                            (param_descriptor->mb_param_type == MB_PARAM_INPUT)) {
+                            value = *(float*)temp_data_ptr;
+                            ESP_LOGI(TAG, "Characteristic #%u %s (%s) value = %f (0x%" PRIx32 ") read successful.",
+                                            param_descriptor->cid,
+                                            param_descriptor->param_key,
+                                            param_descriptor->param_units,
+                                            value,
+                                            *(uint32_t*)temp_data_ptr);
+                            if (((value > param_descriptor->param_opts.max) ||
+                                (value < param_descriptor->param_opts.min))) {
+                                    alarm_state = true;
+                                    break;
+                            }
+                        } else {
+                            uint8_t state = *(uint8_t*)temp_data_ptr;
+                            const char* rw_str = (state & param_descriptor->param_opts.opt1) ? "ON" : "OFF";
+                            if ((state & param_descriptor->param_opts.opt2) == param_descriptor->param_opts.opt2) {
+                                ESP_LOGI(TAG, "Characteristic #%u %s (%s) value = %s (0x%" PRIx8 ") read successful.",
+                                                param_descriptor->cid,
+                                                param_descriptor->param_key,
+                                                param_descriptor->param_units,
+                                                (const char*)rw_str,
+                                                *(uint8_t*)temp_data_ptr);
+                            } else {
+                                ESP_LOGE(TAG, "Characteristic #%u %s (%s) value = %s (0x%" PRIx8 "), unexpected value.",
+                                                param_descriptor->cid,
+                                                param_descriptor->param_key,
+                                                param_descriptor->param_units,
+                                                (const char*)rw_str,
+                                                *(uint8_t*)temp_data_ptr);
+                                alarm_state = true;
+                                break;
+                            }
+                            if (state & param_descriptor->param_opts.opt1) {
+                                alarm_state = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "Characteristic #%u (%s) read fail, err = 0x%x (%s).",
+                                        param_descriptor->cid,
+                                        param_descriptor->param_key,
+                                        (int)err,
+                                        (char*)esp_err_to_name(err));
+                    }
+                }
+                vTaskDelay(POLL_TIMEOUT_TICS); // timeout between polls
+            }
+        }
+        vTaskDelay(UPDATE_CIDS_TIMEOUT_TICS);
+    }
+
+    if (alarm_state) {
+        ESP_LOGI(TAG, "Alarm triggered by cid #%u.", param_descriptor->cid);
+    } else {
+        ESP_LOGE(TAG, "Alarm is not triggered after %u retries.", MASTER_MAX_RETRY);
+    }
+    ESP_LOGI(TAG, "Destroy master...");
+    ESP_ERROR_CHECK(mbc_master_destroy());
+}*/
+
+static void master_operation_func(void *arg) {
+	esp_err_t err= ESP_OK;
+	const mb_parameter_descriptor_t* param_descriptor=NULL;
+	//uint8_t type= param_descriptor->param_type;
+	//uint16_t type= 0;
+	uint8_t type= 0;
+	ESP_LOGI(TAG,"START OPERATIONS");
+	while(1)
+	{
+		
+
+		//holding register data0
+		err=mbc_master_get_cid_info(CID_HOLD_DATA_0,&param_descriptor);
+
+		if((err==ESP_OK)&&(param_descriptor !=NULL))
+		{
+			//uint16_t ac_on=1;
+			uint8_t ac_on=1;
+			err=mbc_master_set_parameter(CID_HOLD_DATA_0,
+					(char*)param_descriptor->param_key,
+					(uint8_t*)&ac_on,
+					&type);
+			if(err== ESP_OK)
+			{
+
+				 ESP_LOGI(TAG, "AC IS ON AT  %u (Holding CID #%u)", ac_on, CID_HOLD_DATA_0);
+			}
+            else
+            	 ESP_LOGE(TAG, "AC IS Off at %u (Holding CID #%u)",ac_on, CID_HOLD_DATA_0);
+
+		}
+		vTaskDelay(pdMS_TO_TICKS(3000));
+
+		err= mbc_master_get_cid_info(CID_HOLD_DATA_1,&param_descriptor);
+			if((err==ESP_OK)&&(param_descriptor !=NULL))
+			{
+				//uint16_t unit_mode=4;
+				uint8_t unit_mode=4;
+				err=mbc_master_set_parameter(CID_HOLD_DATA_1,
+						(char*)param_descriptor->param_key,
+						(uint8_t*)&unit_mode,
+						&type);
+						
+						switch(unit_mode){
+						case 0:
+                        ESP_LOGI(TAG, "Mode set to auto %u (Holding CID #%u)", unit_mode, CID_HOLD_DATA_1);
+                        break;
+ 
+ 						case 1:
+                        ESP_LOGI(TAG, "Mode set to heat %u (Holding CID #%u)", unit_mode, CID_HOLD_DATA_1);
+                        break;                       
+
+						case 2:
+                        ESP_LOGI(TAG, "Mode set to dry %u (Holding CID #%u)", unit_mode, CID_HOLD_DATA_1);
+                        break;
+
+						case 3:
+                        ESP_LOGI(TAG, "Mode set to fan %u (Holding CID #%u)", unit_mode, CID_HOLD_DATA_1);
+                        break;   
+                        
+						case 4:
+                        ESP_LOGI(TAG, "Mode set to cool%u (Holding CID #%u)", unit_mode, CID_HOLD_DATA_1);
+                        break;                     
+
+                        default:
+                        ESP_LOGI(TAG, "Mode set is invalid %u (Holding CID #%u)", unit_mode, CID_HOLD_DATA_1);
+                        break;      						
+						}
+
+			}
+			else
+              {
+                   ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);
+               }
+              vTaskDelay(pdMS_TO_TICKS(3000));
+    
+                       err=mbc_master_get_cid_info(CID_HOLD_DATA_2,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {
+						// uint16_t ac_speed=1;
+						 uint8_t ac_speed=1;
+						 err=mbc_master_set_parameter(CID_HOLD_DATA_2, //write
+						 (char*)param_descriptor->param_key,
+						 (uint8_t *)&ac_speed,
+						 &type);
+						 switch(ac_speed){
+						 case 0:
+						 ESP_LOGI(TAG,"FAN SPEED SET TO AUTO AT %u (HOLDING CID #%u)",ac_speed,CID_HOLD_DATA_2);
+						 break;
+						 case 1:
+						 ESP_LOGI(TAG,"FAN SPEED SET TO low AT %u (HOLDING CID #%u)",ac_speed,CID_HOLD_DATA_2);
+						 break;
+						 case 2:
+						 ESP_LOGI(TAG,"FAN SPEED SET TO mid AT %u (HOLDING CID #%u)",ac_speed,CID_HOLD_DATA_2);
+						break;
+						 case 3:
+						 ESP_LOGI(TAG,"FAN SPEED SET TO high AT %u (HOLDING CID #%u)",ac_speed,CID_HOLD_DATA_2);	
+						break;
+						 case 4:
+						 ESP_LOGI(TAG,"FAN SPEED SET TO super high AT %u (HOLDING CID #%u)",ac_speed,CID_HOLD_DATA_2);					 
+                           break;	
+                           default :
+                           ESP_LOGI(TAG,"invalid mode %u",ac_speed);				   
+					   }
+					   }
+					   else 
+					   { 
+						   ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);
+                       }
+                           
+                         vTaskDelay(pdMS_TO_TICKS(3000));
+                         
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_3,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {
+						// uint16_t vane_pos=1;
+						uint8_t vane_pos=1;
+                         err=mbc_master_set_parameter(CID_HOLD_DATA_3, //write
+						 (char*)param_descriptor->param_key,
+						 &vane_pos,
+						 &type);
+						 switch(vane_pos){
+							 case 0:
+							 ESP_LOGI(TAG, "Position 1 at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3); 
+							 break;
+							 
+							 case 1:
+							  ESP_LOGI(TAG, "Position 2 at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3);
+							 break;
+							 
+							 case 2:
+							  ESP_LOGI(TAG, "Position 3 at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3);
+							 break;			
+							 
+							 case 3:
+							  ESP_LOGI(TAG, "Position 4 at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3);
+							 break;
+							 
+							 case 4:
+							  ESP_LOGI(TAG, "Position 5 at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3);
+							 break;			
+							 
+							 case 5:
+							  ESP_LOGI(TAG, "Position 6 at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3);
+							 break;		
+							 
+							 case 6:
+							  ESP_LOGI(TAG, "Position 7 at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3);
+							 break;	
+							 case 7:
+							  ESP_LOGI(TAG, "Position swing at %u (HOLDING CID #%u)",vane_pos,CID_HOLD_DATA_3);
+							 break;	
+							 
+							 default:
+							  ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);
+							  break;
+							  					 
+							 }
+	                     }
+                         vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_4,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {
+						// uint16_t ac_unit_setpt=10;     //temp set at 10 
+						uint8_t ac_unit_setpt=10;     //temp set at 10                     
+                           err=mbc_master_set_parameter(CID_HOLD_DATA_4, //write
+						 (char*)param_descriptor->param_key,
+						 &ac_unit_setpt,
+						 &type); 
+						 if(ac_unit_setpt)
+						 {
+					      ESP_LOGI(TAG, "temp set  at %u (HOLDING CID #%u)",ac_unit_setpt,CID_HOLD_DATA_4);
+	 
+						 }   
+						 else  
+						 ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);
+						 }
+                         vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_5,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {
+						// uint16_t	ac_unit_temp_read;
+						 uint8_t	ac_unit_temp_read;
+						 err=mbc_master_get_parameter(CID_HOLD_DATA_5, (char *)param_descriptor->param_key,
+						  &ac_unit_temp_read, &type);
+						  ESP_LOGI(TAG, "temp read  at %u (HOLDING CID #%u)",ac_unit_temp_read,CID_HOLD_DATA_5);
+						  }				                	                     
+                  
+                        vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_6,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {      
+						   //uint16_t window_con=1;
+						   uint8_t window_con=1;
+						   err= mbc_master_set_parameter(CID_HOLD_DATA_6, (char *)param_descriptor->param_key,
+						    &window_con, &type);
+						    if(window_con==0)
+						    {
+							 ESP_LOGI(TAG, "window is open at %u (HOLDING CID #%u)",window_con,CID_HOLD_DATA_6);
+	
+							}  
+							else if(window_con==1)   
+							{
+							 ESP_LOGI(TAG, "window is close  at %u (HOLDING CID #%u)",window_con,CID_HOLD_DATA_6);
+
+							}  
+							else 
+							{
+                            ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);
+                            }
+                       }  
+                        vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_7,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {      
+						 //  uint16_t adapter=1;  
+						  uint8_t adapter=1;
+						   err= mbc_master_set_parameter(CID_HOLD_DATA_7, (char *)param_descriptor->param_key,
+						    &adapter, &type);
+						    if(adapter==0)
+						    {	
+							 ESP_LOGI(TAG, "adapter is on at %u (HOLDING CID #%u)",adapter,CID_HOLD_DATA_7);
+							 }
+							else if(adapter==1)
+							{
+                         	 ESP_LOGI(TAG, "adapter is off at %u (HOLDING CID #%u)",adapter,CID_HOLD_DATA_7);
+							
+							}
+							else { 
+	                         ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);							
+                             }
+                      }
+                        vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_8,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {      
+						   uint8_t remote=1;
+						  // uint16_t remote=1;
+						   err= mbc_master_set_parameter(CID_HOLD_DATA_8, (char *)param_descriptor->param_key,
+						    &remote, &type);
+						    if(remote==0)
+						    {	
+							 ESP_LOGI(TAG, "remote is on at %u (HOLDING CID #%u)",remote,CID_HOLD_DATA_8);
+							 }
+							else if(remote==1)
+							{
+                         	 ESP_LOGI(TAG, "remote is off at %u (HOLDING CID #%u)",remote,CID_HOLD_DATA_8);
+							
+							}
+							else { 
+	                         ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);							
+                             }	
+                         }    
+                        vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_9,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {      
+						 //  uint16_t ac_oprn_time=1;
+						 uint8_t ac_oprn_time=1;
+						   err= mbc_master_set_parameter(CID_HOLD_DATA_9, (char *)param_descriptor->param_key,
+						    &ac_oprn_time, &type);
+						    if(ac_oprn_time==0)
+						    {	
+							 ESP_LOGI(TAG, "ac_oprn_time is on at %u (HOLDING CID #%u)",ac_oprn_time,CID_HOLD_DATA_9);
+							 }
+							else if(ac_oprn_time==1)
+							{
+                         	 ESP_LOGI(TAG, "ac_oprn_time is off at %u (HOLDING CID #%u)",ac_oprn_time,CID_HOLD_DATA_9);
+							
+							}
+							else { 
+	                         ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);							
+                             }
+                             	
+                         } 
+                         vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_10,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {      
+						  // uint16_t ac_unit_alarm_status=1;
+						  	   uint8_t ac_unit_alarm_status=1;
+						   err= mbc_master_set_parameter(CID_HOLD_DATA_10, (char *)param_descriptor->param_key,
+						    &ac_unit_alarm_status, &type);
+						    if(ac_unit_alarm_status==0)
+						    {	
+							 ESP_LOGI(TAG, "ac_unit_alarm_status is on at %u (HOLDING CID #%u)",ac_unit_alarm_status,CID_HOLD_DATA_10);
+							 }
+							else if(ac_unit_alarm_status==1)
+							{
+                         	 ESP_LOGI(TAG, "ac_unit_alarm_status is off at %u (HOLDING CID #%u)",ac_unit_alarm_status,CID_HOLD_DATA_10);
+							
+							}
+							else { 
+	                         ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);							
+                             }     
+                          }   
+                          vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_11,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {      
+						 //  uint16_t error_code=1;
+						 uint8_t error_code=1;
+						   err= mbc_master_set_parameter(CID_HOLD_DATA_11, (char *)param_descriptor->param_key,
+						    &error_code, &type);
+						    if(error_code==0)
+						    {	
+							 ESP_LOGI(TAG, "error_code is on at %u (HOLDING CID #%u)",error_code,CID_HOLD_DATA_11);
+							 }
+							else if(error_code==1)
+							{
+                         	 ESP_LOGI(TAG, "error_code is off at %u (HOLDING CID #%u)",error_code,CID_HOLD_DATA_11);
+							
+							}
+							else { 
+	                         ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);							
+                             }                                                                                					   
+						   }												                          
+                          vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_12,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {      
+						  // uint16_t ambient_mode=1;
+						   uint8_t ambient_mode=1;
+						   err= mbc_master_set_parameter(CID_HOLD_DATA_12, (char *)param_descriptor->param_key,
+						    &ambient_mode, &type);
+						    if(ambient_mode==0)
+						    {	
+							 ESP_LOGI(TAG, "ambient_mode is on at %u (HOLDING CID #%u)",ambient_mode,CID_HOLD_DATA_12);
+							 }
+							else if(ambient_mode==1)
+							{
+                         	 ESP_LOGI(TAG, "ambient_mode is off at %u (HOLDING CID #%u)",ambient_mode,CID_HOLD_DATA_12);
+							
+							}
+							else { 
+	                         ESP_LOGE(TAG, "Modbus Write Error: 0x%x", err);							
+                             } 
+                            }
+                            
+                             
+                          vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_13,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {
+						// uint16_t ac_unit_real_setpt;     //temp set at 10   
+						 uint8_t ac_unit_real_setpt;     //temp set at 10                   
+                           err=mbc_master_get_parameter(CID_HOLD_DATA_13, //read
+						 (char*)param_descriptor->param_key,
+						 &ac_unit_real_setpt,
+						 &type); 
+						  ESP_LOGI(TAG, "real temp read  at %u (HOLDING CID #%u)",ac_unit_real_setpt,CID_HOLD_DATA_13);
+						 
+                       }
+ 
+			                	                     
+                  
+                          vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_14,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {
+						// uint16_t ac_unit_max_setpt;     //temp set at 10         
+						 uint8_t ac_unit_max_setpt;     //temp set at 10              
+                           err=mbc_master_get_parameter(CID_HOLD_DATA_14, //read
+						 (char*)param_descriptor->param_key,
+						 &ac_unit_max_setpt,
+						 &type); 
+						  ESP_LOGI(TAG, "max temp read  at %u (HOLDING CID #%u)",ac_unit_max_setpt,CID_HOLD_DATA_14);
+                       }                       
+						      
+                          vTaskDelay(pdMS_TO_TICKS(3000));
+                        err=mbc_master_get_cid_info(CID_HOLD_DATA_15,&param_descriptor);
+                       if((err==ESP_OK) && (param_descriptor!=NULL))
+                       {
+						// uint16_t ac_unit_min_setpt;     //temp set at 10   
+						uint8_t ac_unit_min_setpt;     //temp set at 10                      
+                           err=mbc_master_get_parameter(CID_HOLD_DATA_15, //read
+						 (char*)param_descriptor->param_key,
+						 &ac_unit_min_setpt,
+						 &type); 
+						  ESP_LOGI(TAG, "min temp read  at %u (HOLDING CID #%u)",ac_unit_min_setpt,CID_HOLD_DATA_15);
+                       }						                             						   												                          
+          }
+          }
+
+// Modbus master initialization
+static esp_err_t master_init(void)
+{
+    // Initialize and start Modbus controller
+    mb_communication_info_t comm = {
+            .port = MB_PORT_NUM,
+#if CONFIG_MB_COMM_MODE_ASCII
+            .mode = MB_MODE_ASCII,
+#elif CONFIG_MB_COMM_MODE_RTU
+            .mode = MB_MODE_RTU,
+#endif
+            .baudrate = MB_DEV_SPEED,
+            .parity = MB_PARITY_NONE
+    };
+    void* master_handler = NULL;
+
+    esp_err_t err = mbc_master_init(MB_PORT_SERIAL_MASTER, &master_handler);
+    MB_RETURN_ON_FALSE((master_handler != NULL), ESP_ERR_INVALID_STATE, TAG,
+                                "mb controller initialization fail.");
+    MB_RETURN_ON_FALSE((err == ESP_OK), ESP_ERR_INVALID_STATE, TAG,
+                            "mb controller initialization fail, returns(0x%x).", (int)err);
+    err = mbc_master_setup((void*)&comm);
+    MB_RETURN_ON_FALSE((err == ESP_OK), ESP_ERR_INVALID_STATE, TAG,
+                            "mb controller setup fail, returns(0x%x).", (int)err);
+
+    // Set UART pin numbers
+    err = uart_set_pin(MB_PORT_NUM, CONFIG_MB_UART_TXD, CONFIG_MB_UART_RXD,
+                              CONFIG_MB_UART_RTS, UART_PIN_NO_CHANGE);
+    MB_RETURN_ON_FALSE((err == ESP_OK), ESP_ERR_INVALID_STATE, TAG,
+        "mb serial set pin failure, uart_set_pin() returned (0x%x).", (int)err);
+
+    err = mbc_master_start();
+    MB_RETURN_ON_FALSE((err == ESP_OK), ESP_ERR_INVALID_STATE, TAG,
+                            "mb controller start fail, returned (0x%x).", (int)err);
+
+    // Set driver mode to Half Duplex
+    err = uart_set_mode(MB_PORT_NUM, UART_MODE_RS485_HALF_DUPLEX);
+    MB_RETURN_ON_FALSE((err == ESP_OK), ESP_ERR_INVALID_STATE, TAG,
+            "mb serial set mode failure, uart_set_mode() returned (0x%x).", (int)err);
+
+    vTaskDelay(5);
+    err = mbc_master_set_descriptor(&device_parameters[0], num_device_parameters);
+    MB_RETURN_ON_FALSE((err == ESP_OK), ESP_ERR_INVALID_STATE, TAG,
+                                "mb controller set descriptor fail, returns(0x%x).", (int)err);
+    ESP_LOGI(TAG, "Modbus master stack initialized...");
+    return err;
+    ESP_LOGI(TAG, "holding_reg_params size = %d", sizeof(holding_reg_params_t));
+
+}
+
+void app_main(void)
+{
+    // Initialization of device peripheral and objects
+    ESP_ERROR_CHECK(master_init());
+    vTaskDelay(10);
+
+    master_operation_func(NULL);
+}

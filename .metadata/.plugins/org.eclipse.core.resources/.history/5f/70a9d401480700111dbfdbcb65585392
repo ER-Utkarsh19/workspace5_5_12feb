@@ -1,0 +1,19 @@
+# Get the absolute path of the component directory
+set(bacnet_src "${COMPONENT_DIR}/src/bacnet")
+set(port_dir "${COMPONENT_DIR}/ports/esp32")
+
+idf_component_register(
+    SRCS 
+        "${bacnet_src}/datalink/bip.c"
+        "${bacnet_src}/npdu.c"
+        "${bacnet_src}/apdu.c"
+        "${bacnet_src}/whois.c"
+        "${bacnet_src}/rp.c"
+        "${port_dir}/net.c"
+        "${port_dir}/stubs.c"
+    INCLUDE_DIRS 
+        "src" 
+        "ports/esp32"
+    REQUIRES 
+        lwip esp_netif
+)

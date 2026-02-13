@@ -1,0 +1,66 @@
+# components/bacnet/CMakeLists.txt
+
+# 1. Setup paths
+set(BACNET_ROOT "bacnet-stack")
+
+# 2. Add Source Files
+file(GLOB_RECURSE BACNET_SOURCES 
+    "${BACNET_ROOT}/src/bacnet/*.c"
+)
+
+# 3. EXCLUDE Problematic & Unused Files
+# -------------------------------------
+
+# Remove Router logic (incompatible pointer error)
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*h_routed_npdu.c$")
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*s_router.c$")
+
+# Remove UBASIC (scripting) - Fixes "array subscript" errors
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*ubasic.*")
+
+# Remove Trend Logs - Fixes "deprecated function" warnings
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*trendlog.c$")
+
+# Remove Time Value - Fixes "format specifier" error
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*time_value.c$")
+
+# Remove PC/Linux specific files
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*ports/.*") 
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*apps/.*")
+list(FILTER BACNET_SOURCES EXCLUDE REGEX ".*demo/.*")
+
+# 4. Register the component
+idf_component_register(
+    SRCS 
+        "bacnet.c"           
+        ${BACNET_SOURCES}    
+    
+    INCLUDE_DIRS 
+        "include"
+        "${BACNET_ROOT}/src"
+        "${BACNET_ROOT}/src/bacnet/basic/object"
+        "${BACNET_ROOT}/src/bacnet/basic/service"
+    
+    REQUIRES 
+        lwip 
+        nvs_flash
+)
+
+# 5. Compiler Flags
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    BACNET_STACK_STATIC_DEFINE
+    BACDL_BIP=1      
+    BACDL_MSTP=0     
+    BAC_ROUTING=0    
+)
+
+# 6. DISABLE WARNINGS AS ERRORS (Important!)
+# This prevents the build from stopping on minor warnings like "deprecated"
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Wno-error=format
+    -Wno-error=char-subscripts
+    -Wno-error=deprecated-declarations
+    -Wno-error=implicit-fallthrough
+    -Wno-unused-variable
+    -Wno-unused-function
+)

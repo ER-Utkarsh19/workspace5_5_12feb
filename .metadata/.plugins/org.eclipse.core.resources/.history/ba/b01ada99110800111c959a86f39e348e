@@ -1,0 +1,204 @@
+/**
+ * @file main.c
+ * @brief BACnet Client/Server Example for ESP32 (Fixed for BACnet Stack v1.x)
+ */
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+#include "driver/gpio.h"
+
+/* BACnet Stack Includes */
+#include "bacnet/config.h"
+#include "bacnet/basic/object/device.h"
+#include "bacnet/datalink/datalink.h"
+#include "bacnet/basic/services.h"
+#include "bacnet/basic/tsm/tsm.h"
+#include "bacnet/basic/service/h_rp.h"
+#include "bacnet/basic/service/h_wp.h"
+#include "bacnet/basic/service/h_whois.h"
+#include "bacnet/whois.h"
+#include "bacnet/iam.h"
+#include "bacnet/rp.h"
+#include "bacnet/wp.h"
+#include "bacnet/bactext.h" // Required for text helper functions
+
+/* WIFI CONFIGURATION - EDIT THESE */
+#define WIFI_SSID      "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD  "YOUR_WIFI_PASSWORD"
+
+/* DEVICE CONFIGURATION */
+#define DEVICE_ID      12345
+#define DEVICE_NAME    "ESP32-Client"
+
+static const char *TAG = "BACnet";
+
+/* Forward declaration of platform specific init */
+extern bool bip_init_esp32(const char *ifname);
+
+/* WiFi Event Handler */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        esp_wifi_connect();
+        ESP_LOGI(TAG, "Retrying to connect to WiFi...");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "WiFi Connected! IP:" IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+/* Initialize WiFi */
+void wifi_init_sta(void)
+{
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+/* Example: Read Property */
+static void read_property_example(
+    uint32_t device_id,
+    BACNET_OBJECT_TYPE object_type,
+    uint32_t object_instance,
+    BACNET_PROPERTY_ID object_property)
+{
+    static uint8_t invoke_id = 0;
+    BACNET_ADDRESS dest;
+    
+    // Find address of device
+    if (address_bind_request(device_id, &max_apdu, &dest)) {
+        // Updated API call for v1.x - Arguments passed directly
+        invoke_id = Send_Read_Property_Request(
+            device_id,          // Destination Device ID
+            object_type,        // Object Type
+            object_instance,    // Object Instance
+            object_property,    // Property ID
+            BACNET_ARRAY_ALL    // Array Index
+        );
+        ESP_LOGI(TAG, "Sent ReadProperty Request (Invoke ID: %d)", invoke_id);
+    } else {
+        ESP_LOGW(TAG, "Device %lu not found in address cache. Sending Who-Is...", (unsigned long)device_id);
+        Send_WhoIs(device_id, device_id);
+    }
+}
+
+/* Initialization */
+static void bacnet_device_init(void)
+{
+    Device_Set_Object_Instance_Number(DEVICE_ID);
+    
+    // Fix: v1.x API requires length argument
+    Device_Set_Object_Name(DEVICE_NAME, strlen(DEVICE_NAME));
+    Device_Set_Model_Name("ESP32-BACnet", strlen("ESP32-BACnet"));
+    Device_Set_Description("ESP32 BACnet Device", strlen("ESP32 BACnet Device"));
+    Device_Set_Location("IoT", strlen("IoT"));
+    
+    Device_Set_System_Status(STATUS_OPERATIONAL, true);
+    
+    /* Initialize Services */
+    apdu_set_unconfirmed_master_transaction_handle(NULL);
+    apdu_set_confirmed_handler(SERVICE_CONFIRMED_READ_PROPERTY, handler_read_property);
+    apdu_set_confirmed_handler(SERVICE_CONFIRMED_WRITE_PROPERTY, handler_write_property);
+    apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_WHO_IS, handler_who_is);
+    apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_I_AM, handler_i_am_bind);
+}
+
+/* Main BACnet Task */
+static void bacnet_task(void *pvParameters)
+{
+    // Initialize BACnet/IP on ESP32
+    if (!bip_init_esp32("WIFI_STA_DEF")) {
+        ESP_LOGE(TAG, "BACnet/IP Init Failed!");
+        vTaskDelete(NULL);
+    }
+
+    bacnet_device_init();
+    
+    // Send initial "I-Am"
+    Send_I_Am(&Handler_Transmit_Buffer[0]);
+    
+    // Initial Who-Is to find other devices
+    Send_WhoIs(-1, -1);
+
+    uint32_t last_seconds = 0;
+    
+    while (1) {
+        uint32_t current_seconds = esp_timer_get_time() / 1000000;
+        
+        // 1. Datalink Maintenance (Keep-alive, etc.)
+        // datalink_maintenance_timer(current_seconds - last_seconds); // Enable if available in your stack
+        last_seconds = current_seconds;
+
+        // 2. Receive and Handle Packets
+        BACNET_ADDRESS src;
+        uint8_t pdu[MAX_APDU];
+        uint16_t pdu_len;
+        
+        // Use generic datalink receive (maps to BIP or MSTP)
+        pdu_len = datalink_receive(&src, &pdu[0], MAX_APDU, 10);
+        
+        if (pdu_len) {
+            npdu_handler(&src, &pdu[0], pdu_len);
+        }
+        
+        // 3. Handle Timeouts / Retries
+        tsm_timer_milliseconds(10);
+        
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "ESP32 BACnet Starting...");
+    
+    // Init NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Connect to WiFi
+    wifi_init_sta();
+    
+    // Create BACnet Task
+    xTaskCreate(bacnet_task, "bacnet_task", 4096, NULL, 5, NULL);
+}

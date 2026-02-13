@@ -1,0 +1,221 @@
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h> // Needed for sockets
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_log.h"
+#include "bacnet/datalink/bip.h"
+#include "bacnet/basic/sys/debug.h"
+#include "bacnet/bacdef.h"
+
+static const char *TAG = "BIP_PORT";
+static int bip_socket = -1; // The UDP Socket File Descriptor
+
+// --- 1. GET IP ADDRESS (Your code, slightly improved) ---
+bool bip_get_addr(BACNET_IP_ADDRESS *addr)
+{
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+    if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+        // Convert ESP32 IP (uint32) to BACnet IP (4 bytes)
+        // Note: esp_ip4_addr1 macros handle the byte extraction
+        addr->address[0] = esp_ip4_addr1(&ip_info.ip);
+        addr->address[1] = esp_ip4_addr2(&ip_info.ip);
+        addr->address[2] = esp_ip4_addr3(&ip_info.ip);
+        addr->address[3] = esp_ip4_addr4(&ip_info.ip);
+        
+        addr->port = 0xBAC0; // Port 47808
+        return true;
+    }
+    return false;
+}
+
+// --- 2. GET BROADCAST ADDRESS (Calculated correctly) ---
+bool bip_get_broadcast_addr(BACNET_IP_ADDRESS *addr)
+{
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+    if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+        // Calculate Subnet Directed Broadcast: (IP | ~Netmask)
+        uint32_t broadcast_ip = ip_info.ip.addr | ~ip_info.netmask.addr;
+
+        addr->address[0] = (broadcast_ip) & 0xFF;
+        addr->address[1] = (broadcast_ip >> 8) & 0xFF;
+        addr->address[2] = (broadcast_ip >> 16) & 0xFF;
+        addr->address[3] = (broadcast_ip >> 24) & 0xFF;
+        
+        addr->port = 0xBAC0;
+        return true;
+    }
+    
+    // Fallback if Wi-Fi is down
+    addr->address[0] = 255; 
+    addr->address[1] = 255; 
+    addr->address[2] = 255; 
+    addr->address[3] = 255;
+    addr->port = 0xBAC0;
+    return false;
+}
+
+// --- 3. INITIALIZE UDP SOCKET ---
+bool bip_init(char *ifname)
+{
+    if (bip_socket >= 0) {
+        return true; // Already initialized
+    }
+
+    struct sockaddr_in server_addr;
+
+    // Create UDP socket
+    bip_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (bip_socket < 0) {
+        ESP_LOGE(TAG, "Failed to create socket");
+        return false;
+    }
+
+    // Set up binding address (0.0.0.0 : 47808)
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons(0xBAC0);
+
+    // Bind socket
+    if (bind(bip_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        ESP_LOGE(TAG, "Failed to bind socket");
+        close(bip_socket);
+        bip_socket = -1;
+        return false;
+    }
+
+    // Set Non-Blocking Mode (Important for the main loop)
+    int flags = fcntl(bip_socket, F_GETFL, 0);
+    fcntl(bip_socket, F_SETFL, flags | O_NONBLOCK);
+
+    ESP_LOGI(TAG, "BACnet/IP UDP Socket Initialized on Port 47808");
+    return true;
+}
+
+// --- 4. RECEIVE PACKET ---
+int bip_receive(
+    BACNET_ADDRESS *src,    // OUT: Who sent the packet
+    uint8_t *pdu,           // OUT: Buffer to store packet data
+    unsigned max_pdu,       // IN:  Size of buffer
+    unsigned timeout)       // IN:  Milliseconds to wait (usually 0)
+{
+    if (bip_socket < 0) return 0;
+
+    struct sockaddr_in sender_addr;
+    socklen_t sender_len = sizeof(sender_addr);
+    
+    // Check if data is available (using select for timeout handling)
+    struct timeval tv;
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(bip_socket, &readfds);
+    
+    tv.tv_sec = timeout / 1000;
+    tv.tv_usec = (timeout % 1000) * 1000;
+
+    int activity = select(bip_socket + 1, &readfds, NULL, NULL, &tv);
+
+    if (activity > 0 && FD_ISSET(bip_socket, &readfds)) {
+        int received_bytes = recvfrom(bip_socket, pdu, max_pdu, 0, 
+                                      (struct sockaddr *)&sender_addr, &sender_len);
+
+        if (received_bytes > 0) {
+            // Fill in the Source Address struct for the BACnet Stack
+            if (src) {
+                src->mac_len = 6;
+                // Copy IP
+                memcpy(&src->mac[0], &sender_addr.sin_addr.s_addr, 4);
+                // Copy Port
+                uint16_t port = ntohs(sender_addr.sin_port);
+                memcpy(&src->mac[4], &port, 2);
+                
+                src->net = 0; // Local network
+                src->len = 0; // No routing
+            }
+            return received_bytes;
+        }
+    }
+    
+    return 0; // No data
+}
+
+// --- 5. SEND PACKET ---
+int bip_send_pdu(
+    BACNET_ADDRESS *dest,   // Who are we sending to?
+    BACNET_NPDU_DATA *npdu_data,
+    uint8_t *pdu,           // The Data
+    unsigned pdu_len)       // Length of Data
+{
+    if (bip_socket < 0) return -1;
+
+    struct sockaddr_in receiver_addr;
+    memset(&receiver_addr, 0, sizeof(receiver_addr));
+    receiver_addr.sin_family = AF_INET;
+
+    // 1. Prepare Destination Address
+    if (dest->net == 0) {
+        // Local send
+        if (dest->mac_len == 6) {
+            // Unicast to specific IP:Port
+            memcpy(&receiver_addr.sin_addr.s_addr, &dest->mac[0], 4);
+            uint16_t port;
+            memcpy(&port, &dest->mac[4], 2);
+            receiver_addr.sin_port = htons(port);
+        } else {
+            // Broadcast
+            BACNET_IP_ADDRESS bcast_addr;
+            bip_get_broadcast_addr(&bcast_addr);
+            
+            receiver_addr.sin_addr.s_addr = htonl(
+                (bcast_addr.address[3] << 24) | 
+                (bcast_addr.address[2] << 16) |
+                (bcast_addr.address[1] << 8) | 
+                bcast_addr.address[0]
+            );
+            receiver_addr.sin_port = htons(0xBAC0);
+        }
+    } else {
+        // Routed packet (Simple default to broadcast if complex routing not set up)
+        return -1; // We aren't a router
+    }
+
+    // 2. Wrap Data with BVLC Header (BACnet/IP Header)
+    // We use a temporary buffer because we need to prepend 4 bytes (BVLC)
+    uint8_t mtu[1500];
+    int mtu_len = 0;
+
+    // Simple BVLC Original-Unicast or Broadcast wrapper
+    mtu[0] = BVLL_TYPE_BACNET_IP; // 0x81
+    if (dest->mac_len == 0) {
+        mtu[1] = BVLC_ORIGINAL_BROADCAST_NPDU; 
+    } else {
+        mtu[1] = BVLC_ORIGINAL_UNICAST_NPDU; 
+    }
+    
+    uint16_t total_len = pdu_len + 4;
+    mtu[2] = (total_len >> 8) & 0xFF;
+    mtu[3] = (total_len) & 0xFF;
+    
+    memcpy(&mtu[4], pdu, pdu_len);
+    mtu_len = total_len;
+
+    // 3. Send via UDP
+    int sent = sendto(bip_socket, mtu, mtu_len, 0,
+                      (struct sockaddr *)&receiver_addr, sizeof(receiver_addr));
+
+    return sent;
+}
+
+// --- 6. CLEANUP ---
+void bip_cleanup(void)
+{
+    if (bip_socket >= 0) {
+        close(bip_socket);
+        bip_socket = -1;
+    }
+}

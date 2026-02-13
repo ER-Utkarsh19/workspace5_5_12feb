@@ -1,0 +1,85 @@
+Here is a "Site Commissioning Cheat Sheet". Save this text in a file named ESP32_Modbus_Master_Notes.txt or in your phone's notes.
+
+When you are at the site and face an issue, just copy and paste this entire block into our chat. It contains every lesson we learned today so I can immediately help you without asking 20 questions.
+
+📋 COPY AND SAVE EVERYTHING BELOW THIS LINE
+System Context: ESP32 Modbus TCP Master (Golden Config)
+
+Hardware: ESP32 (Ethernet/WiFi)
+
+Protocol: Modbus TCP Master
+
+Goal: Read/Write Holding Registers from AC Unit/PLC
+
+✅ THE GOLDEN RULES (Derived from Lab Testing):
+
+Unit ID Logic: The Index in slave_ip_address_table MUST match the Slave Unit ID.
+
+Example: If AC Unit has Slave ID 5, the IP must be at slave_ip_address_table[5].
+
+Config Flag: CONFIG_FMB_TCP_UID_ENABLED MUST be enabled in menuconfig (Component config -> Modbus -> Enable UID Support).
+
+Port: * Site/Real Hardware: Use 502.
+
+PC Simulation: Use 5002 (to avoid Windows Privileged Port blocks).
+
+Rebuild: If changing Port or Menuconfig, run idf.py fullclean before flashing.
+
+🛠 WORKING CODE PATTERN (Reference):
+
+C
+// IP Table Strategy: Map Index to Unit ID
+// Index 0 is ignored (Broadcast). 
+// If Target Unit ID is 1, place IP at Index 1.
+char* slave_ip_address_table[] = {
+    "0.0.0.0",          // Index 0: Broadcast (Do NOT use)
+    "192.168.1.50",     // Index 1: Target IP (For Unit ID 1)
+    NULL
+};
+
+// Enum Strategy: MUST match the Index above
+enum {
+    MB_DEVICE_ADDR1 = 1, // Points to Index 1
+};
+⚠️ TROUBLESHOOTING CHEAT SHEET:
+
+Error: ESP_ERR_TIMEOUT (0x107)
+
+Cause 1: Logic. We are sending Unit ID 0 (Broadcast) and Slave is silent.
+
+Fix: Check Enable UID Support is ON and Enum matches Table Index.
+
+Cause 2: Network. Slave is not reachable.
+
+Fix: Ping the Slave IP. Check Subnet Mask.
+
+Cause 3: Response Time.
+
+Fix: Increase slave_respond_timeout in menuconfig to 5000ms.
+
+Error: "Socket Closed" / "Critical Error -11"
+
+Cause: Connection rejected immediately.
+
+Fix: Check Port number match (502 vs 5002). Check if another master is holding the connection (PLCs often allow only 1 connection).
+
+Error: "Station #0 so no response allowed" (in Simulator)
+
+Cause: ESP32 is sending Unit ID 0.
+
+Fix: Enable UID Support in menuconfig and fullclean.
+
+🚀 HOW TO USE THIS PROMPT
+When you visit the site, if it fails, paste the text above and add this line at the bottom:
+
+"I am now at the site. I have applied the Golden Rules above. Current Status:
+
+Slave IP: [Enter Site IP, e.g., 192.168.1.20]
+
+Slave Unit ID: [Enter Site ID, e.g., 1]
+
+Port: 502
+
+My Error: [Paste your log or describe the behavior]
+
+Please analyze why it is failing based on our previous findings."

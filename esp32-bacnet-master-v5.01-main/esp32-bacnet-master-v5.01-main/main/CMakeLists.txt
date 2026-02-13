@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS 
+        "main.c" 
+        "client_task.c" 
+        "server_task.c"
+        "wifi.c" 
+        "led.c" 
+    INCLUDE_DIRS    
+        "."
+)

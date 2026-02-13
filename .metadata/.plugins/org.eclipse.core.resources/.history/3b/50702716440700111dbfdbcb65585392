@@ -1,0 +1,109 @@
+#include <string.h>
+
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+
+#include <stdio.h>
+#include <stdint.h>      // Add this for int32_t
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h" // Required for xEventGroupSetBits
+#include "esp_wifi.h"               // Required for esp_wifi_connect
+#include "esp_event.h"              // Required for esp_event_base_t
+#include "esp_log.h"                // Required for ESP_LOGI
+#include "nvs_flash.h"
+// BACnet Stack Includes
+#include "bacnet/datalink/bip.h"
+#include "bacnet/basic/services.h"
+#include "bacnet/whois.h"
+#include "bacnet/rp.h"
+
+static const char *TAG = "BACNET_CLIENT";
+
+/* Wi-Fi Configuration */
+#define WIFI_SSID      "YOUR_WIFI_SSID"
+#define WIFI_PASS      "YOUR_WIFI_PASSWORD"
+#define WIFI_CONNECTED_BIT BIT0
+static EventGroupHandle_t s_wifi_event_group;
+
+/* 1. Wi-Fi Event Handler */
+static void event_handler(void* arg, esp_event_base_t event_base,
+                         int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        esp_wifi_connect();
+        ESP_LOGI(TAG, "Retry connecting to the AP");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+/* 2. BACnet Client Logic Task */
+void bacnet_client_task(void *pvParameters) {
+    // Wait for Wi-Fi connection before starting BACnet
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+    ESP_LOGI(TAG, "Connected to network. Initializing BACnet/IP...");
+
+    // Initialize BACnet/IP on default port 0xBAC0 (47808)
+    if (!bip_init(NULL)) {
+        ESP_LOGE(TAG, "Failed to initialize BACnet/IP datalink");
+        vTaskDelete(NULL);
+    }
+
+    while (1) {
+        ESP_LOGI(TAG, "Sending Who-Is broadcast...");
+        Send_WhoIs(-1, -1); // Discover all devices
+
+        // Process incoming packets (I-Am, Read Responses)
+        // This must be called frequently to keep the stack alive
+        uint16_t pdu_len = datalink_receive(NULL, NULL, 0, 0);
+        if (pdu_len > 0) {
+            // Internal stack handlers process the data here
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Repeat every 5 seconds
+    }
+}
+
+void app_main(void) {
+    // Initialize NVS (Required for Wi-Fi)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Initialize TCP/IP and Event Loop
+    s_wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    // Setup Wi-Fi Station
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Create the BACnet task
+    xTaskCreate(bacnet_client_task, "bacnet_task", 4096, NULL, 10, NULL);
+}

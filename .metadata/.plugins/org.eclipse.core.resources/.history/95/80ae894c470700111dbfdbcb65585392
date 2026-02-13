@@ -1,0 +1,10 @@
+
+
+# The minimum version must be set before anything else
+cmake_minimum_required(VERSION 3.16)
+
+# This include brings in the entire ESP-IDF build logic
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# The project name should match your folder
+project(bacnet_11feb)

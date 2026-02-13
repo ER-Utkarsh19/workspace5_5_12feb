@@ -1,0 +1,38 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "bacnet/bacdef.h"
+#include "bacnet/datalink/bip.h"
+#include "bacnet/basic/services.h"
+
+// This is the logic to keep the task alive
+void app_main(void)
+{
+    ESP_LOGI("BACNET", "BACnet Stack Build OK");
+
+    // 1. Initialize NVS (Required for WiFi)
+    // 2. Initialize WiFi and wait for IP...
+    
+    // 3. Initialize BACnet/IP (using our corrected bip_esp32 code)
+    if (!bip_init(NULL)) {
+        ESP_LOGE("BACNET", "Failed to init BACnet/IP");
+        return;
+    }
+
+    // 4. Main BACnet Worker Loop
+    while (1) {
+        // Look for incoming BACnet packets
+        uint16_t pdu_len = 0;
+        BACNET_ADDRESS src = {0};
+        uint8_t buffer[MAX_PDU] = {0};
+
+        pdu_len = bip_receive(&src, &buffer[0], MAX_PDU, 5); // 5ms timeout
+
+        if (pdu_len > 0) {
+            // Process the packet
+            npdu_handler(&src, &buffer[0], pdu_len);
+        }
+
+        // Allow other ESP32 tasks to run
+        vTaskDelay(pdMS_TO_TICKS(1)); 
+    }
+}

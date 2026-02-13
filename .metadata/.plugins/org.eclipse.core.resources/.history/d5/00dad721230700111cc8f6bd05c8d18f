@@ -1,0 +1,10 @@
+#include "esp_log.h"
+#include "bacnet/version.h"
+
+static const char *TAG = "BACNET_TEST";
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "BACnet Stack Build OK");
+    ESP_LOGI(TAG, "BACnet Version: %s", BACNET_VERSION_TEXT);
+}

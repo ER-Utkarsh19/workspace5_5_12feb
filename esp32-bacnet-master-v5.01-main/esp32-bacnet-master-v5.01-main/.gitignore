@@ -1,0 +1,16 @@
+# ESP-IDF build directory
+build/
+latex/
+html/
+
+# Managed components (re-downloaded by the build system)
+managed_components/
+dependencies.lock
+
+# Local config files
+sdkconfig
+sdkconfig.old
+*.json
+
+# Large GIF files (like the one causing errors)
+*.gif

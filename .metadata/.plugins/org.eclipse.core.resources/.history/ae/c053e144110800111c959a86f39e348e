@@ -1,0 +1,415 @@
+/**
+ * @file bacnet_client_example.c
+ * @brief Complete BACnet Client Example for ESP32
+ * 
+ * This example demonstrates how to use ESP32 as a BACnet client
+ * for both BACnet/IP and BACnet MS/TP
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+
+// BACnet includes
+#include "bacnet/basic/object/device.h"
+#include "bacnet/datalink/datalink.h"
+#include "bacnet/basic/services.h"
+#include "bacnet/basic/tsm/tsm.h"
+#include "bacnet/basic/service/h_rp.h"
+#include "bacnet/basic/service/h_wp.h"
+#include "bacnet/basic/service/h_whois.h"
+#include "bacnet/whois.h"
+#include "bacnet/iam.h"
+#include "bacnet/rp.h"
+#include "bacnet/wp.h"
+
+#ifdef BACDL_BIP
+#include "bacnet/datalink/bip.h"
+extern bool bip_init_esp32(const char *ifname);
+#endif
+
+#ifdef BACDL_MSTP
+#include "bacnet/datalink/dlmstp.h"
+extern bool dlmstp_init_esp32(void);
+#endif
+
+static const char *TAG = "BACnet_Client";
+
+/* WiFi Configuration - Change these! */
+#define WIFI_SSID      "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD  "YOUR_WIFI_PASSWORD"
+#define WIFI_MAXIMUM_RETRY  5
+
+/* BACnet Configuration */
+#define MY_DEVICE_ID        1234
+#define MY_DEVICE_NAME      "ESP32_BACnet_Client"
+#define MY_OBJECT_NAME      "ESP32 Device"
+#define MY_VENDOR_ID        999
+#define MY_VENDOR_NAME      "ESP32 Vendor"
+
+/* Choose communication method */
+#define USE_BACNET_IP       1  // 1 = BACnet/IP, 0 = disabled
+#define USE_BACNET_MSTP     0  // 1 = MS/TP, 0 = disabled
+
+#if USE_BACNET_MSTP
+#define MSTP_MAC_ADDRESS    1   // Your MS/TP station address (1-127)
+#define MSTP_MAX_MASTER     127
+#define MSTP_MAX_INFO_FRAMES 1
+#endif
+
+/* WiFi event group */
+static EventGroupHandle_t s_wifi_event_group;
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+
+static int s_retry_num = 0;
+
+/**
+ * @brief WiFi event handler
+ */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < WIFI_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "Retry to connect to the AP");
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+        ESP_LOGI(TAG, "Connect to the AP fail");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+/**
+ * @brief Initialize WiFi as station
+ */
+static void wifi_init_sta(void)
+{
+    s_wifi_event_group = xEventGroupCreate();
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "WiFi initialization finished");
+
+    /* Wait for connection */
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+            pdFALSE,
+            pdFALSE,
+            portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Connected to AP SSID:%s", WIFI_SSID);
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGI(TAG, "Failed to connect to SSID:%s", WIFI_SSID);
+    }
+}
+
+/**
+ * @brief Initialize BACnet device object
+ */
+static void bacnet_device_init(void)
+{
+    Device_Set_Object_Instance_Number(MY_DEVICE_ID);
+    Device_Set_Object_Name(MY_OBJECT_NAME);
+    Device_Set_Vendor_Identifier(MY_VENDOR_ID);
+    Device_Set_Model_Name("ESP32-BACnet");
+    Device_Set_Description("ESP32 BACnet Client Device");
+    Device_Set_Location("IoT Device");
+    
+    ESP_LOGI(TAG, "BACnet Device ID: %u", MY_DEVICE_ID);
+    ESP_LOGI(TAG, "BACnet Device Name: %s", MY_OBJECT_NAME);
+}
+
+/**
+ * @brief Example: Send WhoIs request
+ */
+static void send_whois(void)
+{
+    ESP_LOGI(TAG, "Sending WhoIs request...");
+    Send_WhoIs(-1, -1);  // Broadcast WhoIs to all devices
+}
+
+/**
+ * @brief Example: Read property from a device
+ * @param device_id Target device ID
+ * @param object_type Object type (e.g., OBJECT_ANALOG_INPUT)
+ * @param object_instance Object instance number
+ * @param property Property ID (e.g., PROP_PRESENT_VALUE)
+ */
+static void read_property_example(
+    uint32_t device_id,
+    BACNET_OBJECT_TYPE object_type,
+    uint32_t object_instance,
+    BACNET_PROPERTY_ID property)
+{
+    BACNET_ADDRESS dest;
+    uint8_t invoke_id = 0;
+    BACNET_READ_PROPERTY_DATA data;
+    
+    // For this example, we assume we know the device address
+    // In real application, you'd get this from Who-Is/I-Am exchange
+    dest.mac_len = 0;  // Will be filled by datalink layer
+    
+    data.object_type = object_type;
+    data.object_instance = object_instance;
+    data.object_property = property;
+    data.array_index = BACNET_ARRAY_ALL;
+    
+    invoke_id = Send_Read_Property_Request(device_id, &data);
+    
+    if (invoke_id > 0) {
+        ESP_LOGI(TAG, "ReadProperty request sent. Invoke ID: %u", invoke_id);
+    } else {
+        ESP_LOGE(TAG, "Failed to send ReadProperty request");
+    }
+}
+
+/**
+ * @brief I-Am handler - called when we receive I-Am response
+ */
+void My_I_Am_Handler(
+    uint8_t *service_request,
+    uint16_t service_len,
+    BACNET_ADDRESS *src)
+{
+    int len = 0;
+    uint32_t device_id = 0;
+    unsigned max_apdu = 0;
+    int segmentation = 0;
+    uint16_t vendor_id = 0;
+    
+    len = iam_decode_service_request(service_request, &device_id, 
+                                     &max_apdu, &segmentation, &vendor_id);
+    
+    if (len > 0) {
+        ESP_LOGI(TAG, "Received I-Am from Device %u, Vendor %u, Max APDU %u",
+                 device_id, vendor_id, max_apdu);
+        
+        // Store the device address for future communication
+        // In a real application, maintain a device table here
+    }
+}
+
+/**
+ * @brief Read Property ACK handler
+ */
+void My_Read_Property_Ack_Handler(
+    uint8_t *service_request,
+    uint16_t service_len,
+    BACNET_ADDRESS *src,
+    BACNET_CONFIRMED_SERVICE_ACK_DATA *service_data)
+{
+    BACNET_READ_PROPERTY_DATA data;
+    BACNET_APPLICATION_DATA_VALUE value;
+    int len = 0;
+    
+    len = rp_ack_decode_service_request(service_request, service_len, &data);
+    
+    if (len > 0) {
+        ESP_LOGI(TAG, "ReadProperty ACK received:");
+        ESP_LOGI(TAG, "  Object: %s %u",
+                 bactext_object_type_name(data.object_type),
+                 data.object_instance);
+        ESP_LOGI(TAG, "  Property: %s",
+                 bactext_property_name(data.object_property));
+        
+        // Decode the value
+        len = bacapp_decode_application_data(
+            data.application_data,
+            data.application_data_len,
+            &value);
+            
+        if (len > 0) {
+            switch(value.tag) {
+                case BACNET_APPLICATION_TAG_REAL:
+                    ESP_LOGI(TAG, "  Value: %.2f", value.type.Real);
+                    break;
+                case BACNET_APPLICATION_TAG_UNSIGNED_INT:
+                    ESP_LOGI(TAG, "  Value: %u", value.type.Unsigned_Int);
+                    break;
+                case BACNET_APPLICATION_TAG_BOOLEAN:
+                    ESP_LOGI(TAG, "  Value: %s", 
+                             value.type.Boolean ? "true" : "false");
+                    break;
+                case BACNET_APPLICATION_TAG_CHARACTER_STRING:
+                    ESP_LOGI(TAG, "  Value: %s", 
+                             characterstring_value(&value.type.Character_String));
+                    break;
+                default:
+                    ESP_LOGI(TAG, "  Value: (type %d)", value.tag);
+                    break;
+            }
+        }
+    }
+}
+
+/**
+ * @brief Main BACnet task
+ */
+static void bacnet_task(void *pvParameters)
+{
+    uint16_t pdu_len = 0;
+    BACNET_ADDRESS src = {0};
+    uint8_t Rx_Buf[MAX_MPDU] = {0};
+    
+    ESP_LOGI(TAG, "BACnet task started");
+    
+    // Initialize BACnet device
+    bacnet_device_init();
+    
+    // Register service handlers
+    apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_I_AM, My_I_Am_Handler);
+    apdu_set_confirmed_ack_handler(SERVICE_CONFIRMED_READ_PROPERTY, 
+                                   My_Read_Property_Ack_Handler);
+    
+#if USE_BACNET_IP
+    // Initialize BACnet/IP
+    ESP_LOGI(TAG, "Initializing BACnet/IP...");
+    if (!bip_init_esp32("WIFI_STA_DEF")) {
+        ESP_LOGE(TAG, "BACnet/IP initialization failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    datalink_set("bip");
+#endif
+
+#if USE_BACNET_MSTP
+    // Initialize MS/TP
+    ESP_LOGI(TAG, "Initializing MS/TP...");
+    if (!dlmstp_init_esp32()) {
+        ESP_LOGE(TAG, "MS/TP initialization failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    datalink_set("mstp");
+    dlmstp_set_mac_address(MSTP_MAC_ADDRESS);
+    dlmstp_set_max_master(MSTP_MAX_MASTER);
+    dlmstp_set_max_info_frames(MSTP_MAX_INFO_FRAMES);
+#endif
+
+    // Initialize datalink
+    if (!datalink_init(NULL)) {
+        ESP_LOGE(TAG, "Datalink initialization failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "BACnet client ready!");
+    
+    // Send initial WhoIs after 5 seconds
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    send_whois();
+    
+    // Main loop
+    uint32_t last_whois = 0;
+    
+    while (1) {
+        // Process incoming messages
+        pdu_len = datalink_receive(&src, &Rx_Buf[0], MAX_MPDU, 10);
+        
+        if (pdu_len > 0) {
+            npdu_handler(&src, &Rx_Buf[0], pdu_len);
+        }
+        
+        // Process transaction state machine
+        tsm_timer_milliseconds(10);
+        
+        // Send WhoIs every 60 seconds
+        if ((xTaskGetTickCount() - last_whois) > pdMS_TO_TICKS(60000)) {
+            send_whois();
+            last_whois = xTaskGetTickCount();
+        }
+        
+        // Example: Read a property every 30 seconds
+        // Uncomment and modify for your needs:
+        /*
+        static uint32_t last_read = 0;
+        if ((xTaskGetTickCount() - last_read) > pdMS_TO_TICKS(30000)) {
+            read_property_example(
+                5678,                      // Target device ID
+                OBJECT_ANALOG_INPUT,       // Object type
+                0,                         // Object instance
+                PROP_PRESENT_VALUE);       // Property
+            last_read = xTaskGetTickCount();
+        }
+        */
+        
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+/**
+ * @brief Main application entry point
+ */
+void app_main(void)
+{
+    ESP_LOGI(TAG, "ESP32 BACnet Client Starting...");
+    
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    
+#if USE_BACNET_IP
+    // Initialize WiFi for BACnet/IP
+    ESP_LOGI(TAG, "Initializing WiFi...");
+    wifi_init_sta();
+    vTaskDelay(pdMS_TO_TICKS(2000));  // Wait for network to stabilize
+#endif
+    
+    // Create BACnet task
+    xTaskCreate(bacnet_task, "bacnet_task", 8192, NULL, 5, NULL);
+    
+    ESP_LOGI(TAG, "System initialized");
+}
+

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename resource &apos;dvp_spi_lcd_30jan_v0&apos; to &apos;inference_code_30jan&apos;" description="Rename resource &apos;dvp_spi_lcd_30jan_v0&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="/dvp_spi_lcd_30jan_v0" name="inference_code_30jan" stamp="1769764481520" updateReferences="true"/>
+</session>

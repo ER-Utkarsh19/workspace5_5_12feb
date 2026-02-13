@@ -1,0 +1,33 @@
+# components/bacnet/CMakeLists.txt
+
+# 1. Setup paths
+set(BACNET_ROOT "bacnet-stack")
+
+# 2. Add the official BACnet Stack source files
+# We exclude the 'ports' folder because we will handle the port manually
+file(GLOB_RECURSE BACNET_SOURCES 
+    "${BACNET_ROOT}/src/bacnet/*.c"
+)
+
+# 3. Create the library
+idf_component_register(
+    SRCS 
+        "bacnet.c"           # Your main component file
+        ${BACNET_SOURCES}    # The official stack files
+    
+    INCLUDE_DIRS 
+        "include"
+        "${BACNET_ROOT}/src" # This fixes the "header not found" errors
+    
+    REQUIRES 
+        lwip                 # Required for BACnet/IP networking
+        nvs_flash            # Required if you save Device IDs
+)
+
+# 4. Define compilation flags for Embedded Mode
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    BACNET_STACK_STATIC_DEFINE
+    BACDL_BIP=1      # Enable BACnet/IP
+    BACDL_MSTP=0     # Disable MS/TP (RS485)
+    BAC_ROUTING=0
+)

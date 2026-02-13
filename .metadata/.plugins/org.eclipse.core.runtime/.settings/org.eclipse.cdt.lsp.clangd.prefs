@@ -1,0 +1,3 @@
+additional_options=--compile-commands-dir\=C\:\\Users\\admin\\worskpace_esp5.5\\mb_tcp_master_5feb\\build
+eclipse.preferences.version=1
+query_driver=C\:\\Espressif\\tools\\xtensa-esp-elf\\esp-14.2.0_20251107\\xtensa-esp-elf\\bin\\xtensa-esp32-elf-gcc.exe
